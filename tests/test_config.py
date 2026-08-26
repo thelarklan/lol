@@ -33,6 +33,13 @@ def test_pinned_lts_alias_is_resolved(repository: Path) -> None:
     assert load_effective(repository).values["jenkins"]["version"] == PINNED_JENKINS_VERSION
 
 
+def test_repository_manifest_is_validated_before_defaults_are_applied(repository: Path) -> None:
+    (repository / "lol.yaml").write_text("node:\n  executors: 2\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="'version' is a required property"):
+        load_effective(repository)
+
+
 def test_manifest_rejects_parent_pipeline_path(repository: Path) -> None:
     config = load_effective(repository).values
     config["pipeline"]["file"] = "../Jenkinsfile"

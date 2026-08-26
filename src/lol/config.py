@@ -194,6 +194,8 @@ def load_effective(
     root = find_repository(start)
     manifest_path = root / MANIFEST_NAME
     project = read_yaml(manifest_path, required=require_manifest)
+    if manifest_path.exists():
+        validate_manifest(project, manifest_path)
     user_path = AppPaths.discover().config / "config.yaml"
     user = read_yaml(user_path, required=False)
     values = deep_merge(DEFAULTS, project)
