@@ -775,7 +775,8 @@ Persists run metadata, console output, results, and artifact indexes independent
 
 ## 23. Proposed repository layout
 
-The implementation language remains an explicit project decision. The repository should preserve these conceptual boundaries:
+The v1 implementation is a Python 3.11+ package built with Hatchling. The repository preserves
+these conceptual boundaries:
 
 ```text
 lol/
@@ -884,18 +885,17 @@ The local profile maps these requirements to the built-in node. Future profiles 
 
 The following require focused implementation spikes or explicit decisions:
 
-1. Implementation language and packaging format
-2. Local SCM snapshot transport used by Pipeline from SCM
-3. Jenkins job materialization API
-4. Plugin resolver and lock-file implementation
-5. Supported Jenkins core range and upgrade policy
-6. Artifact download versus index-only behavior
-7. Credential providers and secret-injection interface
-8. Windows and macOS support strategy
-9. Behavior for Git submodules and large-file storage
-10. Stable numeric CLI exit codes
-11. Privileged repair execution policy by supported operating system
-12. Credential-provider interface and temporary-secret lifetime
+1. Local SCM snapshot transport used by Pipeline from SCM
+2. Jenkins job materialization API
+3. Plugin resolver and lock-file implementation
+4. Supported Jenkins core range and upgrade policy
+5. Artifact download versus index-only behavior
+6. Credential providers and secret-injection interface
+7. Windows and macOS support strategy
+8. Behavior for Git submodules and large-file storage
+9. Stable numeric CLI exit codes
+10. Privileged repair execution policy by supported operating system
+11. Credential-provider interface and temporary-secret lifetime
 
 These decisions should be recorded under `docs/decisions/` as architecture decision records.
 
