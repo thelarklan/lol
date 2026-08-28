@@ -4,8 +4,8 @@ LOL is a local Jenkins harness for running a repository's real `Jenkinsfile` on 
 
 It creates an isolated, reproducible Jenkins controller, uses the controller's built-in node to execute the pipeline on the host, and leaves workload orchestration to the repository. If the pipeline normally launches several rootless Podman containers in parallel, it can do the same locally.
 
-> **Project status:** implementation in vertical slices. Packaging, configuration inspection, and
-> deterministic Jenkins/plugin locking are executable.
+> **Project status:** implementation in vertical slices. Packaging, configuration inspection,
+> deterministic Jenkins/plugin locking, and guided repository initialization are executable.
 
 ## Why LOL?
 
@@ -144,10 +144,13 @@ The result is `lol.yaml` and an initial `lol.plugins.lock.yaml`:
 version: 1
 
 jenkins:
-  version: "pinned-lts"
+  version: "2.568.2"
   plugins:
-    - workflow-aggregator
     - configuration-as-code
+    - credentials-binding
+    - git
+    - plain-credentials
+    - workflow-aggregator
 
 pipeline:
   file: Jenkinsfile
@@ -175,6 +178,16 @@ lol init --non-interactive \
 ```
 
 Noninteractive initialization fails rather than guessing when an important choice remains ambiguous. Existing configuration is never overwritten without explicit confirmation or `--force`.
+
+Use the same discovery and diff-preview flow to update an existing repository contract:
+
+```bash
+lol config edit
+lol config edit --yes
+```
+
+`config edit` preserves repository-owned plugin, parameter, environment, and artifact settings. It
+does not copy user-level configuration overrides into `lol.yaml`.
 
 ### 2. Verify the host
 
