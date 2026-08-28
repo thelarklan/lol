@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import click
 import pytest
 import yaml
 from click.testing import CliRunner
@@ -139,9 +140,47 @@ def test_lock_cancellation_leaves_repository_unchanged(
     monkeypatch.chdir(repository)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setattr("lol.cli.create_lock", _fake_create_lock)
+    monkeypatch.setattr("lol.cli._is_interactive_terminal", lambda: True)
 
     result = CliRunner().invoke(cli, ["lock"], input="n\n")
 
     assert result.exit_code != 0
     assert "lock update cancelled" in str(result.exception)
     assert not (repository / "lol.plugins.lock.yaml").exists()
+
+
+def test_lock_requires_yes_when_terminal_is_not_interactive(
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr("lol.cli.create_lock", _fake_create_lock)
+    monkeypatch.setattr("lol.cli._is_interactive_terminal", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["lol", "lock"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert "lock update requires an interactive terminal or --yes" in captured.err
+    assert "Traceback" not in captured.err
+    assert not (repository / "lol.plugins.lock.yaml").exists()
+
+
+def test_main_maps_click_abort_to_interrupted(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def abort(*args: object, **kwargs: object) -> None:
+        raise click.Abort()
+
+    monkeypatch.setattr("lol.cli.cli", abort)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 130
+    assert capsys.readouterr().err == "Interrupted.\n"

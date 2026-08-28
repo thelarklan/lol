@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,10 @@ def _diff(path: Path, content: str) -> str:
     return f"{rendered}\n" if rendered else ""
 
 
+def _is_interactive_terminal() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 @cli.command("lock")
 @click.option("--check", "check_only", is_flag=True, help="Report lock drift without writing.")
 @click.option("--yes", is_flag=True, help="Write the displayed lock without confirmation.")
@@ -86,8 +91,11 @@ def lock_command(check_only: bool, yes: bool) -> None:
             click.echo("Plugin lock is already up to date.")
             return
         click.echo(preview, nl=False)
-        if not yes and not click.confirm("Write the plugin lock?", default=True):
-            raise InteractionError("lock update cancelled")
+        if not yes:
+            if not _is_interactive_terminal():
+                raise InteractionError("lock update requires an interactive terminal or --yes")
+            if not click.confirm("Write the plugin lock?", default=True):
+                raise InteractionError("lock update cancelled")
         write_yaml(path, lock)
     click.echo(f"Wrote {path}")
 
@@ -96,6 +104,9 @@ def main() -> None:
     try:
         cli(standalone_mode=False)
     except KeyboardInterrupt:
+        click.echo("Interrupted.", err=True)
+        raise SystemExit(EXIT_INTERRUPTED) from None
+    except click.Abort:
         click.echo("Interrupted.", err=True)
         raise SystemExit(EXIT_INTERRUPTED) from None
     except click.ClickException as exc:
