@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thelarklan.github.io/lol/schemas/plugin-lock-v1.schema.json",
+  "title": "LOL Jenkins plugin lock v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "manifest_digest", "jenkins", "resolver", "plugins"],
+  "properties": {
+    "version": {"const": 1},
+    "manifest_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "jenkins": {"$ref": "#/$defs/artifact"},
+    "resolver": {"$ref": "#/$defs/artifact"},
+    "plugins": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "version", "requested", "url", "sha256"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$"},
+          "version": {"type": "string", "pattern": "^[A-Za-z0-9_.+-]+$"},
+          "requested": {"type": "boolean"},
+          "url": {"type": "string", "pattern": "^https://"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "url", "sha256"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^[A-Za-z0-9_.+-]+$"},
+        "url": {"type": "string", "pattern": "^https://"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

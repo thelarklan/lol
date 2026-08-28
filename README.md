@@ -4,8 +4,8 @@ LOL is a local Jenkins harness for running a repository's real `Jenkinsfile` on 
 
 It creates an isolated, reproducible Jenkins controller, uses the controller's built-in node to execute the pipeline on the host, and leaves workload orchestration to the repository. If the pipeline normally launches several rootless Podman containers in parallel, it can do the same locally.
 
-> **Project status:** implementation in vertical slices. Packaging, manifest validation, project
-> identity, XDG paths, configuration precedence, redaction, and `lol config show` are executable.
+> **Project status:** implementation in vertical slices. Packaging, configuration inspection, and
+> deterministic Jenkins/plugin locking are executable.
 
 ## Why LOL?
 
@@ -59,6 +59,35 @@ lol --format json config show
 
 Precedence is built-in defaults, repository `lol.yaml`, user configuration under
 `$XDG_CONFIG_HOME/lol/config.yaml`, and explicit CLI overrides. Secret-like keys are redacted.
+
+## Pin Jenkins and plugins
+
+Resolve the repository's requested plugins against the Jenkins release selected by `lol.yaml`:
+
+```bash
+lol lock --yes
+git add lol.plugins.lock.yaml
+```
+
+`pinned-lts` resolves to the exact Jenkins LTS tested by the installed LOL release. LOL downloads
+that checksum-pinned WAR and the checksum-pinned official Jenkins Plugin Installation Manager,
+resolves the complete plugin dependency graph with upgrades disabled, hashes every resolved plugin,
+and writes a deterministic `lol.plugins.lock.yaml`. Existing locks are previewed as a unified diff
+before replacement unless `--yes` is supplied.
+
+Cached inputs live below `$XDG_CACHE_HOME/lol` (or `~/.cache/lol`) and are reused only after their
+SHA-256 digest is verified. Later controller commands consume only the URLs, versions, and hashes in
+the committed lock; they do not resolve plugin versions implicitly.
+
+Use the read-only check in CI or before starting a controller:
+
+```bash
+lol lock --check
+```
+
+The check validates the packaged lock schema, release-owned artifact coordinates, canonical Jenkins
+and plugin URLs, sorted unique plugin IDs, requested-plugin markers, and the digest of the effective
+Jenkins contract. It performs no network access and fails if the lock is missing or stale.
 
 ## Quick start
 
