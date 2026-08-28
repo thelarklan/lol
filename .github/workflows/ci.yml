@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install hatch
+      - run: hatch run lint
+      - run: hatch run cov
+      - run: hatch build
+      - run: python -m venv /tmp/lol-smoke
+      - run: /tmp/lol-smoke/bin/pip install dist/*.whl
+      - run: /tmp/lol-smoke/bin/lol --version
+      - run: python -m pip install pipx
+      - run: PIPX_HOME=/tmp/pipx-home PIPX_BIN_DIR=/tmp/pipx-bin pipx install dist/*.whl
+      - run: /tmp/pipx-bin/lol --version

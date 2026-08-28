@@ -4,7 +4,8 @@ LOL is a local Jenkins harness for running a repository's real `Jenkinsfile` on 
 
 It creates an isolated, reproducible Jenkins controller, uses the controller's built-in node to execute the pipeline on the host, and leaves workload orchestration to the repository. If the pipeline normally launches several rootless Podman containers in parallel, it can do the same locally.
 
-> **Project status:** architecture and CLI contract. The commands below describe the intended first release and will become executable as the implementation lands.
+> **Project status:** implementation in vertical slices. Packaging, manifest validation, project
+> identity, XDG paths, configuration precedence, redaction, and `lol config show` are executable.
 
 ## Why LOL?
 
@@ -27,6 +28,37 @@ flowchart TD
     P --> W2["Workload container B"]
     P --> W3["Workload container C"]
 ```
+
+## Installation
+
+LOL requires Python 3.11 or newer. The recommended installation uses
+[pipx](https://pipx.pypa.io/stable/installation/):
+
+```bash
+pipx install .
+lol --version
+```
+
+An ordinary virtual environment is the supported fallback:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install .
+.venv/bin/lol --version
+```
+
+## Inspect configuration
+
+Place a schema-v1 `lol.yaml` in a Git repository, then inspect the validated, merged,
+non-secret configuration:
+
+```bash
+lol config show
+lol --format json config show
+```
+
+Precedence is built-in defaults, repository `lol.yaml`, user configuration under
+`$XDG_CONFIG_HOME/lol/config.yaml`, and explicit CLI overrides. Secret-like keys are redacted.
 
 ## Quick start
 
@@ -320,3 +352,4 @@ Those cases will be supported later through additional agent backends without ch
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Python packaging decision](docs/decisions/0001-python-hatchling-package.md)
