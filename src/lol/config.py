@@ -6,8 +6,9 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import jsonschema
 import yaml
@@ -36,92 +37,10 @@ __all__ = [
 ]
 SECRET_KEY = re.compile(r"(?i)(password|passwd|secret|token|credential|api[_-]?key)")
 
-MANIFEST_SCHEMA: JSON = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://thelarklan.github.io/lol/schemas/lol-v1.schema.json",
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["version", "jenkins", "pipeline"],
-    "properties": {
-        "version": {"const": 1},
-        "project": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {"id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"}},
-        },
-        "jenkins": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["version", "plugins"],
-            "properties": {
-                "version": {"type": "string", "minLength": 1},
-                "plugins": {
-                    "type": "array",
-                    "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+(?::[^: ]+)?$"},
-                    "uniqueItems": True,
-                },
-            },
-        },
-        "pipeline": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["file"],
-            "properties": {
-                "file": {"type": "string", "minLength": 1},
-                "parameters": {
-                    "type": "object",
-                    "additionalProperties": {"type": ["string", "number", "boolean", "null"]},
-                },
-            },
-        },
-        "node": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "executors": {"type": "integer", "minimum": 1, "maximum": 32},
-                "labels": {
-                    "type": "array",
-                    "items": {"type": "string", "minLength": 1},
-                    "uniqueItems": True,
-                },
-            },
-        },
-        "requirements": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "commands": {
-                    "type": "array",
-                    "items": {"type": "string", "pattern": "^[A-Za-z0-9_.+-]+$"},
-                    "uniqueItems": True,
-                },
-                "podman": {"type": "boolean"},
-            },
-        },
-        "environment": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "pass": {
-                    "type": "array",
-                    "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
-                    "uniqueItems": True,
-                },
-                "set": {
-                    "type": "object",
-                    "additionalProperties": {"type": ["string", "number", "boolean"]},
-                },
-            },
-        },
-        "artifacts": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "patterns": {"type": "array", "items": {"type": "string", "minLength": 1}}
-            },
-        },
-    },
-}
+MANIFEST_SCHEMA = cast(
+    JSON,
+    json.loads(files("lol").joinpath("schemas/lol-v1.schema.json").read_text(encoding="utf-8")),
+)
 
 DEFAULTS: JSON = {
     "version": SCHEMA_VERSION,
@@ -204,7 +123,7 @@ def load_effective(
         values = deep_merge(values, overrides)
     if values["jenkins"]["version"] in {"pinned-lts", "lts"}:
         values["jenkins"]["version"] = PINNED_JENKINS_VERSION
-    validate_manifest(values, manifest_path)
+    validate_manifest(values)
     return EffectiveConfig(
         root=root,
         manifest_path=manifest_path,
