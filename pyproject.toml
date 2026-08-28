@@ -23,6 +23,7 @@ dependencies = [
   "click>=8.1,<9",
   "jsonschema>=4.19,<5",
   "PyYAML>=6,<7",
+  "requests>=2.31,<3",
 ]
 
 [project.urls]
@@ -45,6 +46,7 @@ dependencies = [
   "ruff>=0.7",
   "types-PyYAML>=6",
   "types-jsonschema>=4",
+  "types-requests>=2",
 ]
 
 [tool.hatch.envs.default.scripts]
