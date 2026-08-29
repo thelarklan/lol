@@ -86,8 +86,9 @@ lol lock --check
 ```
 
 The check validates the packaged lock schema, release-owned artifact coordinates, canonical Jenkins
-and plugin URLs, sorted unique plugin IDs, requested-plugin markers, and the digest of the effective
-Jenkins contract. It performs no network access and fails if the lock is missing or stale.
+and plugin URLs, sorted unique plugin IDs, requested-plugin markers, and the digest of the
+repository-owned Jenkins contract. User-level overrides never change committed lock inputs. The
+check performs no network access and fails if the lock is missing or stale.
 
 ## Quick start
 
@@ -120,23 +121,21 @@ Found Jenkinsfiles:
 
 Which Jenkinsfile should LOL run? [1]: 1
 
-Jenkins release:
-  1. Current LTS (recommended)
-  2. Specific version
-Select [1]: 1
+Jenkins version [pinned-lts]:
 
-Detected node labels:
-  - linux
-  - firmware-builder
+Detected labels: firmware-builder, linux
 Add these labels to the local node? [Y/n]: y
 
 Podman usage detected. Require rootless Podman? [Y/n]: y
 Maximum simultaneous Jenkins builds [1]: 1
 
-Create lol.yaml and lol.plugins.lock.yaml? [Y/n]: y
+Write lol.yaml and lol.plugins.lock.yaml? [Y/n]: y
 ```
 
-LOL automatically determines the repository root, Git identity, host platform, safe project identity, available Java and Podman installations, default executor count, and recommended Jenkins LTS. It prompts for ambiguous Jenkinsfiles, rejected defaults, detected labels, workload requirements, and other choices that affect committed configuration.
+LOL automatically determines the repository root, Jenkinsfiles, requested labels, Podman usage,
+default executor count, and recommended Jenkins LTS. It prompts for ambiguous Jenkinsfiles,
+rejected defaults, detected labels, workload requirements, and other choices that affect committed
+configuration.
 
 The result is `lol.yaml` and an initial `lol.plugins.lock.yaml`:
 
@@ -158,10 +157,12 @@ pipeline:
 node:
   executors: 1
   labels:
-    - lol-local
     - linux
+    - lol-local
 
 requirements:
+  commands:
+    - git
   podman: true
 ```
 

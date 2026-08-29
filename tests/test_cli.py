@@ -322,6 +322,20 @@ def test_init_explicit_automation_choices_and_force_are_honored(
     assert manifest["requirements"]["podman"] is True
 
 
+def test_init_rejects_conflicting_podman_requirements(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(repository)
+
+    result = CliRunner().invoke(
+        cli,
+        ["init", "--force", "--require", "podman", "--no-require-podman"],
+    )
+
+    assert result.exit_code != 0
+    assert "conflicts with --no-require-podman" in str(result.exception)
+
+
 def test_init_cancellation_previews_both_files_and_writes_neither(
     repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -396,6 +410,32 @@ def test_config_edit_guides_all_editable_repository_choices(
     assert manifest["jenkins"]["version"] == "2.567.3"
     assert manifest["node"] == {
         "executors": 2,
-        "labels": ["custom", "linux", "lol-local"],
+        "labels": ["custom", "lol-local"],
     }
     assert manifest["requirements"]["podman"] is True
+
+
+def test_config_edit_preserves_podman_command_and_honors_explicit_no(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest_path = repository / "lol.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["requirements"] = {"commands": ["git", "podman"], "podman": True}
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr("lol.cli.create_lock", _fake_create_lock)
+    monkeypatch.setattr("lol.cli._is_interactive", lambda: True)
+
+    result = CliRunner().invoke(
+        cli,
+        ["config", "edit"],
+        input="\n\n\nn\n\ny\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    updated = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    assert updated["requirements"] == {
+        "commands": ["git", "podman"],
+        "podman": False,
+    }

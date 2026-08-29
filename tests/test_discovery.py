@@ -9,13 +9,13 @@ from lol.discovery import discover, initial_manifest
 from lol.errors import ConfigError
 
 
-def test_discovery_finds_safe_jenkinsfiles_labels_podman_and_tools(
+def test_discovery_finds_safe_jenkinsfiles_labels_and_podman(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     (root / "Jenkinsfile").write_text(
-        "pipeline { agent { label 'linux && firmware-builder' } }\n",
+        "pipeline { agent { label 'linux && firmware-builder && !windows' } }\n",
         encoding="utf-8",
     )
     (root / "ci").mkdir()
@@ -28,15 +28,11 @@ def test_discovery_finds_safe_jenkinsfiles_labels_podman_and_tools(
     external = tmp_path / "Jenkinsfile.external"
     external.write_text("node('outside') {}\n", encoding="utf-8")
     (root / "Jenkinsfile.link").symlink_to(external)
-    monkeypatch.setattr("lol.discovery.shutil.which", lambda command: f"/tools/{command}")
-
     found = discover(root)
 
     assert found.jenkinsfiles == (Path("Jenkinsfile"), Path("ci/Jenkinsfile.release"))
     assert found.labels == ("firmware-builder", "linux", "release")
     assert found.podman is True
-    assert found.java == "/tools/java"
-    assert found.git == "/tools/git"
 
 
 def test_initial_manifest_is_deterministic_and_rejects_unsafe_pipeline() -> None:
@@ -57,5 +53,28 @@ def test_initial_manifest_is_deterministic_and_rejects_unsafe_pipeline() -> None
     }
     assert manifest["jenkins"]["version"] == PINNED_JENKINS_VERSION
 
+    without_linux = initial_manifest(Path("Jenkinsfile"), labels=("custom",))
+    assert without_linux["node"]["labels"] == ["custom", "lol-local"]
+
     with pytest.raises(ConfigError, match="repository-relative"):
         initial_manifest(Path("../Jenkinsfile"))
+
+
+def test_discovery_wraps_unreadable_jenkinsfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    pipeline = root / "Jenkinsfile"
+    pipeline.write_text("node('linux') {}\n", encoding="utf-8")
+    original = Path.read_text
+
+    def read_text(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if path == pipeline:
+            raise PermissionError("permission denied")
+        return original(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    with pytest.raises(ConfigError, match="cannot read Jenkinsfile.*permission denied"):
+        discover(root)

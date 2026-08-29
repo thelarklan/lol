@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +12,7 @@ LABEL_PATTERNS = (
     re.compile(r"agent\s*\{\s*label\s+['\"]([^'\"]+)['\"]", re.DOTALL),
     re.compile(r"node\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"),
 )
-LABEL_TOKEN = re.compile(r"[A-Za-z0-9_.-]+")
+LABEL_TOKEN = re.compile(r"(?P<negated>!\s*)?(?P<label>[A-Za-z0-9_.-]+)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,8 +20,6 @@ class Discovery:
     jenkinsfiles: tuple[Path, ...]
     labels: tuple[str, ...]
     podman: bool
-    java: str | None
-    git: str | None
 
 
 def _inside(root: Path, path: Path) -> bool:
@@ -34,7 +31,11 @@ def _inside(root: Path, path: Path) -> bool:
 
 
 def _labels(expression: str) -> set[str]:
-    return set(LABEL_TOKEN.findall(expression))
+    return {
+        match.group("label")
+        for match in LABEL_TOKEN.finditer(expression)
+        if match.group("negated") is None
+    }
 
 
 def discover(root: Path) -> Discovery:
@@ -47,7 +48,10 @@ def discover(root: Path) -> Discovery:
     labels: set[str] = set()
     podman = False
     for relative in jenkinsfiles:
-        text = (root / relative).read_text(encoding="utf-8", errors="replace")
+        try:
+            text = (root / relative).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise ConfigError(f"cannot read {relative}: {exc}") from exc
         podman = podman or bool(re.search(r"\bpodman\b", text))
         for pattern in LABEL_PATTERNS:
             for match in pattern.finditer(text):
@@ -56,8 +60,6 @@ def discover(root: Path) -> Discovery:
         jenkinsfiles=jenkinsfiles,
         labels=tuple(sorted(labels)),
         podman=podman,
-        java=shutil.which("java"),
-        git=shutil.which("git"),
     )
 
 
@@ -85,7 +87,7 @@ def initial_manifest(
         "pipeline": {"file": pipeline_file.as_posix(), "parameters": {}},
         "node": {
             "executors": executors,
-            "labels": sorted({"lol-local", "linux", *labels}),
+            "labels": sorted({"lol-local", *labels}),
         },
         "requirements": {
             "commands": sorted({"git", *commands}),

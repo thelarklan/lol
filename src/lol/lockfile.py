@@ -15,7 +15,7 @@ import jsonschema
 import requests
 
 from lol.cache import download_verified, sha256_file, store_verified, verify_file
-from lol.config import EffectiveConfig, read_yaml
+from lol.config import DEFAULTS, EffectiveConfig, deep_merge, read_yaml, validate_manifest
 from lol.constants import (
     LOCK_NAME,
     PINNED_JENKINS_SHA256,
@@ -40,7 +40,23 @@ LOCK_SCHEMA = cast(
 )
 
 
+def _repository_lock_config(config: EffectiveConfig) -> EffectiveConfig:
+    repository = read_yaml(config.manifest_path)
+    validate_manifest(repository, config.manifest_path)
+    values = deep_merge(DEFAULTS, repository)
+    if values["jenkins"]["version"] in {"pinned-lts", "lts"}:
+        values["jenkins"]["version"] = PINNED_JENKINS_VERSION
+    validate_manifest(values, config.manifest_path)
+    return EffectiveConfig(
+        root=config.root,
+        manifest_path=config.manifest_path,
+        values=values,
+        sources={"built_in": "LOL defaults", "repository": str(config.manifest_path)},
+    )
+
+
 def normalized_manifest_digest(config: EffectiveConfig) -> str:
+    config = _repository_lock_config(config)
     jenkins = cast(JSON, config.values["jenkins"])
     contract = {
         "jenkins": {
@@ -139,6 +155,7 @@ def _run_resolver(config: EffectiveConfig, war: Path, manager: Path, output: Pat
 
 def create_lock(config: EffectiveConfig, destination: Path | None = None) -> JSON:
     destination = destination or config.root / LOCK_NAME
+    config = _repository_lock_config(config)
     war, manager, jenkins_url, jenkins_sha256 = ensure_tools(config)
     requested_list = [str(item).split(":", 1)[0] for item in config.values["jenkins"]["plugins"]]
     requested = set(requested_list)
@@ -203,6 +220,7 @@ def _validate_lock_schema(lock: JSON, path: Path | None = None) -> None:
 
 
 def load_lock(config: EffectiveConfig, *, verify_drift: bool = True) -> JSON:
+    config = _repository_lock_config(config)
     path = config.root / LOCK_NAME
     lock = read_yaml(path)
     _validate_lock_schema(lock, path)

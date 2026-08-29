@@ -246,7 +246,7 @@ def _init_impl(
     )
     podman = _selected_podman(
         found.podman,
-        True if "podman" in requirements else require_podman,
+        require_podman,
         interactive=interactive,
         yes=yes,
     )
@@ -264,10 +264,12 @@ def _init_impl(
     generated = initial_manifest(
         selected,
         jenkins_version=selected_version,
-        labels=effective_labels,
-        require_podman=podman or "podman" in requirements,
+        labels=(
+            effective_labels if base is not None else tuple(sorted({"linux", *effective_labels}))
+        ),
+        require_podman=podman,
         executors=selected_executors,
-        commands=tuple(item for item in requirements if item != "podman"),
+        commands=requirements,
     )
     if base is None:
         manifest = generated
@@ -286,15 +288,17 @@ def _init_impl(
     if effective_values["jenkins"]["version"] in {"lts", "pinned-lts"}:
         effective_values["jenkins"]["version"] = PINNED_JENKINS_VERSION
     validate_manifest(effective_values)
-    effective = EffectiveConfig(
-        root=root,
-        manifest_path=manifest_path,
-        values=effective_values,
-        sources={"built_in": "LOL defaults", "repository": str(manifest_path)},
-    )
     with tempfile.TemporaryDirectory(prefix="lol-init-") as temporary:
-        candidate = Path(temporary) / LOCK_NAME
-        lock = create_lock(effective, candidate)
+        candidate_manifest = Path(temporary) / MANIFEST_NAME
+        candidate_lock = Path(temporary) / LOCK_NAME
+        write_yaml(candidate_manifest, manifest)
+        effective = EffectiveConfig(
+            root=root,
+            manifest_path=candidate_manifest,
+            values=effective_values,
+            sources={"built_in": "LOL defaults", "repository": str(candidate_manifest)},
+        )
+        lock = create_lock(effective, candidate_lock)
         changed = _write_configuration(
             manifest_path,
             manifest,
@@ -331,6 +335,12 @@ def init_command(
     force: bool,
 ) -> None:
     """Discover and create lol.yaml plus the exact plugin lock."""
+    podman_requirement = "podman" in requirements
+    if podman_requirement and require_podman is False:
+        raise ConfigError("--require podman conflicts with --no-require-podman")
+    if podman_requirement:
+        requirements = tuple(item for item in requirements if item != "podman")
+        require_podman = True
     _init_impl(
         jenkinsfile=jenkinsfile.as_posix() if jenkinsfile else None,
         jenkins_version=jenkins_version,
