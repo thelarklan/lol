@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from lol.errors import ConfigError
 from lol.paths import AppPaths, ProjectPaths
-from lol.project import project_identity
+from lol.project import find_repository, git, project_identity
 
 
 def test_project_identity_is_stable_and_can_be_explicit(repository: Path) -> None:
@@ -15,6 +16,23 @@ def test_project_identity_is_stable_and_can_be_explicit(repository: Path) -> Non
     assert first.project_id.startswith("repo-")
     explicit = project_identity(repository, {"project": {"id": "firmware"}})
     assert explicit.project_id == "firmware"
+
+
+def test_repository_marker_supports_git_missing_doctor(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nested = repository / "nested"
+    nested.mkdir()
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr("lol.project.subprocess.run", unavailable)
+
+    assert find_repository(nested) == repository
+    assert git(repository, "status", check=False) == ""
+    with pytest.raises(ConfigError, match="git status failed"):
+        git(repository, "status")
 
 
 def test_xdg_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

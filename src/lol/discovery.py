@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,8 +12,13 @@ from lol.errors import ConfigError
 LABEL_PATTERNS = (
     re.compile(r"agent\s*\{\s*label\s+['\"]([^'\"]+)['\"]", re.DOTALL),
     re.compile(r"node\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"),
+    re.compile(
+        r"agent\s*\{\s*node\s*\{[^{}]*?\blabel\s+['\"]([^'\"]+)['\"]",
+        re.DOTALL,
+    ),
 )
-LABEL_TOKEN = re.compile(r"(?P<negated>!\s*)?(?P<label>[A-Za-z0-9_.-]+)")
+LABEL_TOKEN = re.compile(r"!|[()]|[A-Za-z0-9_.-]+")
+IGNORED_DISCOVERY_DIRECTORIES = frozenset({".git", "node_modules"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,20 +37,48 @@ def _inside(root: Path, path: Path) -> bool:
 
 
 def _labels(expression: str) -> set[str]:
-    return {
-        match.group("label")
-        for match in LABEL_TOKEN.finditer(expression)
-        if match.group("negated") is None
-    }
+    if any(marker in expression for marker in ("$", "{", "}")):
+        return set()
+    labels: set[str] = set()
+    negation_stack = [False]
+    pending_negation = False
+    for match in LABEL_TOKEN.finditer(expression):
+        token = match.group()
+        if token == "!":
+            pending_negation = not pending_negation
+        elif token == "(":
+            negation_stack.append(negation_stack[-1] ^ pending_negation)
+            pending_negation = False
+        elif token == ")":
+            if len(negation_stack) > 1:
+                negation_stack.pop()
+            pending_negation = False
+        else:
+            if not (negation_stack[-1] ^ pending_negation):
+                labels.add(token)
+            pending_negation = False
+    return labels
+
+
+def _jenkinsfiles(root: Path) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+
+    def walk_error(exc: OSError) -> None:
+        raise ConfigError(f"cannot inspect repository: {exc}") from exc
+
+    for directory, names, files in os.walk(root, topdown=True, onerror=walk_error):
+        names[:] = sorted(name for name in names if name not in IGNORED_DISCOVERY_DIRECTORIES)
+        for name in sorted(files):
+            if not name.startswith("Jenkinsfile"):
+                continue
+            path = Path(directory) / name
+            if path.is_file() and _inside(root, path):
+                candidates.append(path.relative_to(root))
+    return tuple(sorted(candidates))
 
 
 def discover(root: Path) -> Discovery:
-    candidates = (
-        path
-        for path in root.rglob("Jenkinsfile*")
-        if ".git" not in path.relative_to(root).parts and path.is_file() and _inside(root, path)
-    )
-    jenkinsfiles = tuple(sorted(path.relative_to(root) for path in candidates))
+    jenkinsfiles = _jenkinsfiles(root)
     labels: set[str] = set()
     podman = False
     for relative in jenkinsfiles:

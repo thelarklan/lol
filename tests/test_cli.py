@@ -61,6 +61,11 @@ def _fake_create_lock(config: EffectiveConfig, destination: Path | None = None) 
 def test_config_show_json(
     repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    user = tmp_path / "config" / "lol"
+    user.mkdir(parents=True)
+    (user / "config.yaml").write_text(
+        "jenkins:\n  version: 9.9.9\n  plugins: [git, junit]\n", encoding="utf-8"
+    )
     monkeypatch.chdir(repository)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     result = CliRunner().invoke(cli, ["--format", "json", "config", "show"])
@@ -68,6 +73,12 @@ def test_config_show_json(
     value = json.loads(result.output)
     assert value["configuration"]["version"] == 1
     assert value["configuration"]["pipeline"]["file"] == "Jenkinsfile"
+    assert value["configuration"]["jenkins"] == {
+        "version": "9.9.9",
+        "plugins": ["git", "junit"],
+    }
+    assert value["lock_inputs"]["keys"] == ["jenkins.version", "jenkins.plugins"]
+    assert "ignore user" in value["lock_inputs"]["note"]
 
 
 def test_config_show_text_redacts_secret_shaped_values(

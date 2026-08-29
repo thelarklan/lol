@@ -35,6 +35,31 @@ def test_discovery_finds_safe_jenkinsfiles_labels_and_podman(
     assert found.podman is True
 
 
+def test_discovery_handles_nested_node_labels_negated_groups_and_interpolation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "Jenkinsfile").write_text(
+        """
+pipeline {
+  agent { node { label 'linux-big && !(windows || mac)' } }
+  stages { stage('dynamic') { agent { label "linux-${env.ARCH}" } } }
+}
+""",
+        encoding="utf-8",
+    )
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "Jenkinsfile.package").write_text(
+        "node('vendored') {}\n", encoding="utf-8"
+    )
+
+    found = discover(root)
+
+    assert found.jenkinsfiles == (Path("Jenkinsfile"),)
+    assert found.labels == ("linux-big",)
+
+
 def test_initial_manifest_is_deterministic_and_rejects_unsafe_pipeline() -> None:
     manifest = initial_manifest(
         Path("ci/Jenkinsfile"),
