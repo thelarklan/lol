@@ -26,6 +26,7 @@ from lol.lockfile import (
     LOCK_SCHEMA,
     _jenkins_coordinates,
     _plugin_version,
+    _repository_lock_config,
     create_lock,
     ensure_lock_cache,
     load_lock,
@@ -190,20 +191,43 @@ def test_store_verified_is_atomic_and_rejects_bad_source(tmp_path: Path) -> None
 
 def test_manifest_lock_digest_tracks_only_the_jenkins_contract(repository: Path) -> None:
     config = load_effective(repository)
-    values = copy.deepcopy(config.values)
+    base_digest = normalized_manifest_digest(config)
+    repository_values = copy.deepcopy(config.values)
+
+    values = copy.deepcopy(repository_values)
     values["node"]["labels"].append("extra")
-    unrelated = EffectiveConfig(config.root, config.manifest_path, values, config.sources)
-    assert normalized_manifest_digest(config) == normalized_manifest_digest(unrelated)
+    write_yaml(config.manifest_path, values)
+    assert normalized_manifest_digest(load_effective(repository)) == base_digest
 
-    values = copy.deepcopy(config.values)
+    values = copy.deepcopy(repository_values)
     values["jenkins"]["plugins"].append("mailer")
-    changed = EffectiveConfig(config.root, config.manifest_path, values, config.sources)
-    assert normalized_manifest_digest(config) != normalized_manifest_digest(changed)
+    write_yaml(config.manifest_path, values)
+    assert normalized_manifest_digest(load_effective(repository)) != base_digest
 
-    values = copy.deepcopy(config.values)
+    values = copy.deepcopy(repository_values)
     values["jenkins"]["plugins"].reverse()
-    reordered = EffectiveConfig(config.root, config.manifest_path, values, config.sources)
-    assert normalized_manifest_digest(config) == normalized_manifest_digest(reordered)
+    write_yaml(config.manifest_path, values)
+    assert normalized_manifest_digest(load_effective(repository)) == base_digest
+
+
+def test_user_jenkins_overrides_do_not_invalidate_repository_lock(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository_config = load_effective(repository)
+    expected = _valid_lock(repository_config)
+    write_yaml(repository / "lol.plugins.lock.yaml", expected)
+    user = tmp_path / "config" / "lol"
+    user.mkdir(parents=True)
+    write_yaml(user / "config.yaml", {"jenkins": {"plugins": ["git", "junit"]}})
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    effective = load_effective(repository)
+
+    assert effective.values["jenkins"]["plugins"] == ["git", "junit"]
+    assert normalized_manifest_digest(effective) == expected["manifest_digest"]
+    assert load_lock(effective) == expected
+    repository_only = _repository_lock_config(effective)
+    assert repository_only.values["jenkins"] == repository_config.values["jenkins"]
 
 
 def test_packaged_lock_schema_is_the_validation_source() -> None:

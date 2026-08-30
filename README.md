@@ -4,8 +4,8 @@ LOL is a local Jenkins harness for running a repository's real `Jenkinsfile` on 
 
 It creates an isolated, reproducible Jenkins controller, uses the controller's built-in node to execute the pipeline on the host, and leaves workload orchestration to the repository. If the pipeline normally launches several rootless Podman containers in parallel, it can do the same locally.
 
-> **Project status:** implementation in vertical slices. Packaging, configuration inspection, and
-> deterministic Jenkins/plugin locking are executable.
+> **Project status:** implementation in vertical slices. Packaging, configuration inspection,
+> deterministic Jenkins/plugin locking, and guided repository initialization are executable.
 
 ## Why LOL?
 
@@ -86,8 +86,9 @@ lol lock --check
 ```
 
 The check validates the packaged lock schema, release-owned artifact coordinates, canonical Jenkins
-and plugin URLs, sorted unique plugin IDs, requested-plugin markers, and the digest of the effective
-Jenkins contract. It performs no network access and fails if the lock is missing or stale.
+and plugin URLs, sorted unique plugin IDs, requested-plugin markers, and the digest of the
+repository-owned Jenkins contract. User-level overrides never change committed lock inputs. The
+check performs no network access and fails if the lock is missing or stale.
 
 ## Quick start
 
@@ -120,23 +121,21 @@ Found Jenkinsfiles:
 
 Which Jenkinsfile should LOL run? [1]: 1
 
-Jenkins release:
-  1. Current LTS (recommended)
-  2. Specific version
-Select [1]: 1
+Jenkins version [pinned-lts]:
 
-Detected node labels:
-  - linux
-  - firmware-builder
+Detected labels: firmware-builder, linux
 Add these labels to the local node? [Y/n]: y
 
 Podman usage detected. Require rootless Podman? [Y/n]: y
 Maximum simultaneous Jenkins builds [1]: 1
 
-Create lol.yaml and lol.plugins.lock.yaml? [Y/n]: y
+Write lol.yaml and lol.plugins.lock.yaml? [Y/n]: y
 ```
 
-LOL automatically determines the repository root, Git identity, host platform, safe project identity, available Java and Podman installations, default executor count, and recommended Jenkins LTS. It prompts for ambiguous Jenkinsfiles, rejected defaults, detected labels, workload requirements, and other choices that affect committed configuration.
+LOL automatically determines the repository root, Jenkinsfiles, requested labels, Podman usage,
+default executor count, and recommended Jenkins LTS. It prompts for ambiguous Jenkinsfiles,
+rejected defaults, detected labels, workload requirements, and other choices that affect committed
+configuration.
 
 The result is `lol.yaml` and an initial `lol.plugins.lock.yaml`:
 
@@ -144,10 +143,13 @@ The result is `lol.yaml` and an initial `lol.plugins.lock.yaml`:
 version: 1
 
 jenkins:
-  version: "pinned-lts"
+  version: "2.568.2"
   plugins:
-    - workflow-aggregator
     - configuration-as-code
+    - credentials-binding
+    - git
+    - plain-credentials
+    - workflow-aggregator
 
 pipeline:
   file: Jenkinsfile
@@ -155,10 +157,12 @@ pipeline:
 node:
   executors: 1
   labels:
-    - lol-local
     - linux
+    - lol-local
 
 requirements:
+  commands:
+    - git
   podman: true
 ```
 
@@ -175,6 +179,16 @@ lol init --non-interactive \
 ```
 
 Noninteractive initialization fails rather than guessing when an important choice remains ambiguous. Existing configuration is never overwritten without explicit confirmation or `--force`.
+
+Use the same discovery and diff-preview flow to update an existing repository contract:
+
+```bash
+lol config edit
+lol config edit --yes
+```
+
+`config edit` preserves repository-owned plugin, parameter, environment, and artifact settings. It
+does not copy user-level configuration overrides into `lol.yaml`.
 
 ### 2. Verify the host
 
