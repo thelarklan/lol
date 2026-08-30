@@ -86,6 +86,23 @@ def test_doctor_rejects_snapshot_features_that_v1_cannot_reproduce(
     assert final_state(findings) == "Unsupported"
 
 
+def test_doctor_detects_nested_lfs_attributes(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_host_checks(monkeypatch)
+    monkeypatch.setattr("lol.doctor.load_lock", lambda config: {"version": 1})
+    monkeypatch.setattr("lol.doctor.verify_lock_cache", lambda lock: [])
+    nested = repository / "assets"
+    nested.mkdir()
+    (nested / ".gitattributes").write_text("*.bin filter=lfs diff=lfs\n", encoding="utf-8")
+    (nested / "payload.bin").write_bytes(b"content")
+
+    findings = analyze(load_effective(repository), repository / ".state")
+
+    lfs = next(item for item in findings if item.check == "scm.lfs")
+    assert lfs.status == "unsupported"
+
+
 def test_final_state_precedence() -> None:
     assert final_state([Finding("a", "pass", "ok")]) == "Ready"
     assert final_state([Finding("a", "recommendation", "advice")]) == ("Ready with recommendations")

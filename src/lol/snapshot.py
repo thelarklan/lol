@@ -32,6 +32,21 @@ def _run(
     return result.stdout.strip()
 
 
+def _run_bytes(command: list[str]) -> bytes:
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        raise HarnessError(f"{' '.join(command)} failed: {exc}") from exc
+    if result.returncode:
+        detail = (result.stderr or result.stdout).decode(errors="replace").strip()
+        raise HarnessError(f"{' '.join(command)} failed: {detail}")
+    return result.stdout
+
+
 def _port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -50,40 +65,43 @@ class Snapshot:
     def serve(self, timeout: float = 5.0) -> str:
         if self.process and self.process.poll() is None and self.url:
             return self.url
-        port = _port()
         base = self.repository.parent
-        log = (base / "git-daemon.log").open("ab", buffering=0)
-        command = [
-            "git",
-            "daemon",
-            "--reuseaddr",
-            "--export-all",
-            "--strict-paths",
-            f"--base-path={base}",
-            "--listen=127.0.0.1",
-            f"--port={port}",
-            str(self.repository),
-        ]
-        try:
-            self.process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        finally:
-            log.close()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                raise HarnessError("run-scoped Git daemon exited during startup")
+            port = _port()
+            log = (base / "git-daemon.log").open("ab", buffering=0)
+            command = [
+                "git",
+                "daemon",
+                "--reuseaddr",
+                "--export-all",
+                "--strict-paths",
+                f"--base-path={base}",
+                "--listen=127.0.0.1",
+                f"--port={port}",
+                str(self.repository),
+            ]
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                    self.url = f"git://127.0.0.1:{port}/{self.repository.name}"
-                    return self.url
-            except OSError:
-                time.sleep(0.05)
+                self.process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            finally:
+                log.close()
+            while time.monotonic() < deadline:
+                if self.process.poll() is not None:
+                    self.process = None
+                    time.sleep(0.05)
+                    break
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                        self.url = f"git://127.0.0.1:{port}/{self.repository.name}"
+                        return self.url
+                except OSError:
+                    time.sleep(0.05)
         self.stop()
         raise HarnessError("run-scoped Git daemon did not become ready")
 
@@ -105,11 +123,43 @@ class Snapshot:
         self.stop()
 
 
+def uses_lfs(root: Path) -> bool:
+    paths = _run_bytes(
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            ".gitattributes",
+            ":(glob)**/.gitattributes",
+        ]
+    )
+    for value in paths.split(b"\0"):
+        if not value:
+            continue
+        path = root / os.fsdecode(value)
+        try:
+            lines = path.read_bytes().splitlines()
+        except OSError as exc:
+            raise HarnessError(f"cannot inspect Git attributes at {path}: {exc}") from exc
+        if any(
+            b"filter=lfs" in line.split()[1:]
+            for line in lines
+            if line.split() and not line.lstrip().startswith(b"#")
+        ):
+            return True
+    return False
+
+
 def create_snapshot(root: Path, run_dir: Path, revision: str | None = None) -> Snapshot:
     if (root / ".gitmodules").exists():
         raise HarnessError("Git submodules are unsupported in v1 snapshots")
-    attributes = root / ".gitattributes"
-    if attributes.exists() and "filter=lfs" in attributes.read_text(errors="replace"):
+    if uses_lfs(root):
         raise HarnessError("Git LFS hydration is unsupported in v1 snapshots")
     run_dir.mkdir(parents=True, exist_ok=True)
     repository = run_dir / "snapshot.git"
@@ -137,11 +187,14 @@ def create_snapshot(root: Path, run_dir: Path, revision: str | None = None) -> S
             _run(["git", "read-tree", base], env=env)
             _run(["git", "add", "-A", "--", "."], cwd=root, env=env)
             tree = _run(["git", "write-tree"], env=env)
+            base_date = _run(["git", "-C", str(root), "show", "-s", "--format=%aI", base])
             commit_env = env | {
                 "GIT_AUTHOR_NAME": "LOL Snapshot",
                 "GIT_AUTHOR_EMAIL": "lol@localhost",
                 "GIT_COMMITTER_NAME": "LOL Snapshot",
                 "GIT_COMMITTER_EMAIL": "lol@localhost",
+                "GIT_AUTHOR_DATE": base_date,
+                "GIT_COMMITTER_DATE": base_date,
             }
             commit = _run(
                 ["git", "commit-tree", tree, "-p", base, "-m", "LOL run snapshot"],
@@ -149,6 +202,11 @@ def create_snapshot(root: Path, run_dir: Path, revision: str | None = None) -> S
             )
         finally:
             index.unlink(missing_ok=True)
+    refs = _run(
+        ["git", f"--git-dir={repository}", "for-each-ref", "--format=%(refname)"]
+    ).splitlines()
+    for ref in refs:
+        _run(["git", f"--git-dir={repository}", "update-ref", "-d", ref])
     _run(["git", f"--git-dir={repository}", "update-ref", "refs/heads/lol-run", commit])
     _run(["git", f"--git-dir={repository}", "symbolic-ref", "HEAD", "refs/heads/lol-run"])
     (repository / "git-daemon-export-ok").touch(mode=0o600)

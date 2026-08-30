@@ -15,11 +15,13 @@ LOL must also include working-tree changes without modifying the source branch o
 For every run, LOL creates a bare repository beneath the run directory. A temporary Git index
 combines HEAD, tracked modifications, deletions, and non-ignored untracked files into a synthetic
 commit written only to that bare repository. Explicit `--revision` runs reference the selected
-commit without applying working-tree state.
+commit without applying working-tree state. Synthetic commit dates derive from the selected base,
+so the same base and tree produce the same internal commit identity.
 
 LOL exports only the run directory through an ephemeral `git daemon` bound to `127.0.0.1` with a
-strict base path. The generated Pipeline job uses that URL and the `lol-run` branch. The daemon
-stays alive for the build and is stopped in cleanup.
+strict base path. All cloned branch and tag refs are removed before the sole `lol-run` branch is
+created. The generated Pipeline job uses that URL and branch. The daemon stays alive for the build
+and is stopped in cleanup; startup retries if another local process wins the selected-port race.
 
 ## Consequences
 

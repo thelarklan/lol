@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 from pathlib import Path
 
@@ -63,6 +64,26 @@ def test_revision_snapshot_excludes_working_changes(repository: Path, tmp_path: 
     assert b"pipeline" in snapshot_file(snapshot.repository, snapshot.commit, "Jenkinsfile")
 
 
+def test_working_tree_snapshot_is_deterministic(repository: Path, tmp_path: Path) -> None:
+    (repository / "Jenkinsfile").write_text("changed\n", encoding="utf-8")
+
+    first = create_snapshot(repository, tmp_path / "first")
+    second = create_snapshot(repository, tmp_path / "second")
+
+    assert first.tree == second.tree
+    assert first.commit == second.commit
+
+
+def test_snapshot_exports_only_the_run_branch(repository: Path, tmp_path: Path) -> None:
+    run_git(repository, "branch", "private-branch")
+    run_git(repository, "tag", "private-tag")
+
+    snapshot = create_snapshot(repository, tmp_path / "run")
+
+    refs = run_git(snapshot.repository, "for-each-ref", "--format=%(refname)").splitlines()
+    assert refs == ["refs/heads/lol-run"]
+
+
 def test_snapshot_git_daemon_is_loopback_only(repository: Path, tmp_path: Path) -> None:
     snapshot = create_snapshot(repository, tmp_path / "run", "HEAD")
     try:
@@ -85,6 +106,32 @@ def test_snapshot_git_daemon_is_loopback_only(repository: Path, tmp_path: Path) 
     assert snapshot.process is None
 
 
+def test_snapshot_git_daemon_retries_a_port_race(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = create_snapshot(repository, tmp_path / "run", "HEAD")
+    occupied = socket.socket()
+    occupied.bind(("127.0.0.1", 0))
+    occupied.listen()
+    blocked_port = int(occupied.getsockname()[1])
+    ports = iter([blocked_port, 0])
+
+    def port() -> int:
+        selected = next(ports)
+        if selected:
+            return selected
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return int(probe.getsockname()[1])
+
+    monkeypatch.setattr("lol.snapshot._port", port)
+    try:
+        assert snapshot.serve().startswith("git://127.0.0.1:")
+    finally:
+        occupied.close()
+        snapshot.stop()
+
+
 @pytest.mark.parametrize(
     ("marker", "message"),
     [
@@ -100,3 +147,21 @@ def test_snapshot_rejects_unsupported_git_features(
 
     with pytest.raises(HarnessError, match=message):
         create_snapshot(repository, tmp_path / "run")
+
+
+def test_snapshot_rejects_nested_lfs_attributes(repository: Path, tmp_path: Path) -> None:
+    nested = repository / "assets"
+    nested.mkdir()
+    (nested / ".gitattributes").write_text("*.bin filter=lfs diff=lfs\n", encoding="utf-8")
+    (nested / "payload.bin").write_bytes(b"content")
+
+    with pytest.raises(HarnessError, match="Git LFS hydration is unsupported"):
+        create_snapshot(repository, tmp_path / "run")
+
+
+def test_snapshot_ignores_commented_lfs_attributes(repository: Path, tmp_path: Path) -> None:
+    (repository / ".gitattributes").write_text("# *.bin filter=lfs diff=lfs\n", encoding="utf-8")
+
+    snapshot = create_snapshot(repository, tmp_path / "run")
+
+    assert snapshot.repository.is_dir()
