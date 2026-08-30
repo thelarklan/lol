@@ -41,6 +41,7 @@ LOCK_SCHEMA = cast(
 
 
 def _repository_lock_config(config: EffectiveConfig) -> EffectiveConfig:
+    """Reload the committed contract; user and in-memory overrides never define a lock."""
     repository = read_yaml(config.manifest_path)
     validate_manifest(repository, config.manifest_path)
     values = deep_merge(DEFAULTS, repository)
@@ -55,8 +56,7 @@ def _repository_lock_config(config: EffectiveConfig) -> EffectiveConfig:
     )
 
 
-def normalized_manifest_digest(config: EffectiveConfig) -> str:
-    config = _repository_lock_config(config)
+def _normalized_manifest_digest(config: EffectiveConfig) -> str:
     jenkins = cast(JSON, config.values["jenkins"])
     contract = {
         "jenkins": {
@@ -67,6 +67,10 @@ def normalized_manifest_digest(config: EffectiveConfig) -> str:
     }
     payload = json.dumps(contract, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def normalized_manifest_digest(config: EffectiveConfig) -> str:
+    return _normalized_manifest_digest(_repository_lock_config(config))
 
 
 def _plugin_version(path: Path) -> str:
@@ -192,7 +196,7 @@ def create_lock(config: EffectiveConfig, destination: Path | None = None) -> JSO
             )
     lock: JSON = {
         "version": 1,
-        "manifest_digest": normalized_manifest_digest(config),
+        "manifest_digest": _normalized_manifest_digest(config),
         "jenkins": {
             "version": config.values["jenkins"]["version"],
             "url": jenkins_url,
@@ -224,7 +228,7 @@ def load_lock(config: EffectiveConfig, *, verify_drift: bool = True) -> JSON:
     path = config.root / LOCK_NAME
     lock = read_yaml(path)
     _validate_lock_schema(lock, path)
-    if verify_drift and lock["manifest_digest"] != normalized_manifest_digest(config):
+    if verify_drift and lock["manifest_digest"] != _normalized_manifest_digest(config):
         raise ConfigError("plugin lock does not match lol.yaml; run `lol lock`")
     jenkins = cast(JSON, lock["jenkins"])
     jenkins_version = str(jenkins["version"])

@@ -22,6 +22,7 @@ from lol.config import (
     validate_manifest,
 )
 from lol.constants import (
+    EXIT_HOST,
     EXIT_INTERRUPTED,
     EXIT_SUCCESS,
     EXIT_USAGE,
@@ -30,10 +31,12 @@ from lol.constants import (
     PINNED_JENKINS_VERSION,
 )
 from lol.discovery import discover, initial_manifest
+from lol.doctor import Finding, analyze, final_state
 from lol.errors import ConfigError, InteractionError, LolError
 from lol.io import write_yaml, write_yaml_bundle
-from lol.lockfile import create_lock, load_lock
-from lol.project import find_repository
+from lol.lockfile import create_lock, ensure_lock_cache, load_lock
+from lol.paths import ProjectPaths
+from lol.project import ProjectIdentity, find_repository, project_identity
 
 
 class Context:
@@ -51,6 +54,12 @@ class Context:
 
 def _is_interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _resolved_project() -> tuple[EffectiveConfig, ProjectIdentity, ProjectPaths]:
+    config = load_effective()
+    identity = project_identity(config.root, config.values)
+    return config, identity, ProjectPaths.from_id(config.root, identity.project_id)
 
 
 @click.group()
@@ -72,7 +81,17 @@ def config_group() -> None:
 def config_show(context: Context) -> None:
     """Show resolved non-secret configuration and its sources."""
     config = load_effective()
-    context.emit({"configuration": redact(config.values), "sources": config.sources})
+    context.emit(
+        {
+            "configuration": redact(config.values),
+            "sources": config.sources,
+            "lock_inputs": {
+                "keys": ["jenkins.version", "jenkins.plugins"],
+                "source": config.sources["repository"],
+                "note": "Committed locks ignore user and command-line overrides for these keys.",
+            },
+        }
+    )
 
 
 def _diff(path: Path, content: str) -> str:
@@ -315,7 +334,11 @@ def _init_impl(
 @click.option("--jenkinsfile", type=click.Path(path_type=Path))
 @click.option("--jenkins-version")
 @click.option("--label", "labels", multiple=True)
-@click.option("--detected-labels/--no-detected-labels", default=None)
+@click.option(
+    "--detected-labels/--no-detected-labels",
+    default=None,
+    help="Ignore discovered labels with --no-detected-labels; defaults remain.",
+)
 @click.option("--require", "requirements", multiple=True)
 @click.option("--require-podman/--no-require-podman", default=None)
 @click.option("--executors", type=click.IntRange(1, 32))
@@ -421,6 +444,92 @@ def lock_command(check_only: bool, yes: bool) -> None:
                 raise InteractionError("lock update cancelled")
         write_yaml(path, lock)
     click.echo(f"Wrote {path}")
+
+
+def _render_doctor(findings: list[Finding], *, verbose: bool) -> None:
+    icons = {
+        "pass": "✓",
+        "recommendation": "!",
+        "warning": "!",
+        "blocker": "✗",
+        "unsupported": "✗",
+    }
+    for finding in findings:
+        click.echo(f"{icons[finding.status]} {finding.summary}")
+        if verbose and finding.evidence:
+            click.echo(f"  {finding.evidence}")
+        if finding.recommendation:
+            click.echo(f"  {finding.recommendation}")
+
+
+def _lock_repair(findings: list[Finding]) -> Finding | None:
+    return next(
+        (
+            finding
+            for finding in findings
+            if finding.check == "plugins.lock"
+            and finding.status in {"blocker", "recommendation"}
+            and finding.repair_scope == "lol-owned"
+        ),
+        None,
+    )
+
+
+@cli.command("doctor")
+@click.option("--check", "check_only", is_flag=True, help="Analyze without offering repairs.")
+@click.option("--fix", is_flag=True, help="Offer repairs for discovered LOL-owned findings.")
+@click.option("--yes", is_flag=True, help="Apply safe LOL-owned repairs without prompting.")
+@click.option("--verbose", is_flag=True, help="Include diagnostic evidence.")
+@click.pass_obj
+def doctor_command(context: Context, check_only: bool, fix: bool, yes: bool, verbose: bool) -> None:
+    """Validate host prerequisites and pinned inputs."""
+    if check_only and (fix or yes):
+        raise ConfigError("--check cannot be combined with --fix or --yes")
+    config, identity, paths = _resolved_project()
+    findings = analyze(config, paths.state)
+    repaired = False
+    if context.output_format != "json":
+        _render_doctor(findings, verbose=verbose)
+    repair = _lock_repair(findings)
+    if repair is not None and not check_only:
+        if context.output_format == "json" and not yes:
+            if fix:
+                raise InteractionError("JSON doctor repairs require --yes")
+            approved = False
+        elif yes:
+            approved = True
+        elif not _is_interactive():
+            raise InteractionError("doctor repair requires an interactive terminal or --yes")
+        else:
+            action = (
+                "Download the artifacts named by the plugin lock?"
+                if repair.status == "recommendation"
+                else "Regenerate and cache the plugin lock?"
+            )
+            approved = click.confirm(action, default=True)
+        if approved:
+            if repair.status == "recommendation":
+                ensure_lock_cache(load_lock(config))
+            else:
+                create_lock(config)
+            findings = analyze(config, paths.state)
+            repaired = True
+    state = final_state(findings)
+    if context.output_format == "json":
+        context.emit(
+            {
+                "project_id": identity.project_id,
+                "state": state,
+                "findings": [finding.as_dict() for finding in findings],
+            }
+        )
+    else:
+        if repaired:
+            click.echo("Revalidated:")
+            _render_doctor(findings, verbose=verbose)
+        click.echo(f"Doctor result: {state}")
+    if state in {"Blocked", "Unsupported"}:
+        raise LolError(f"host is {state.lower()}", EXIT_HOST)
 
 
 def main() -> None:

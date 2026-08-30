@@ -11,12 +11,17 @@ from lol.errors import ConfigError
 
 
 def git(root: Path, *args: str, check: bool = True) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), *args],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        if check:
+            raise ConfigError(f"git {' '.join(args)} failed: {exc}") from exc
+        return ""
     if check and result.returncode:
         detail = result.stderr.strip() or result.stdout.strip()
         raise ConfigError(f"git {' '.join(args)} failed: {detail}")
@@ -25,12 +30,18 @@ def git(root: Path, *args: str, check: bool = True) -> str:
 
 def find_repository(start: Path | None = None) -> Path:
     start = (start or Path.cwd()).resolve()
-    result = subprocess.run(
-        ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        for candidate in (start, *start.parents):
+            if (candidate / ".git").exists():
+                return candidate
+        raise ConfigError(f"cannot locate Git repository: {exc}") from exc
     if result.returncode:
         raise ConfigError(f"not inside a Git repository: {start}")
     return Path(result.stdout.strip()).resolve()

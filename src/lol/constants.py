@@ -16,6 +16,10 @@ PLUGIN_MANAGER_URL = (
     f"{PLUGIN_MANAGER_VERSION}/jenkins-plugin-manager-{PLUGIN_MANAGER_VERSION}.jar"
 )
 
+# Keep runtime compatibility release-pinned instead of accepting every newer
+# Java feature release without qualification against this Jenkins LTS.
+SUPPORTED_JAVA_VERSIONS = (21, 25)
+
 DEFAULT_PLUGINS = (
     "configuration-as-code",
     "credentials-binding",
@@ -26,5 +30,6 @@ DEFAULT_PLUGINS = (
 
 EXIT_SUCCESS = 0
 EXIT_USAGE = 2
+EXIT_HOST = 3
 EXIT_HARNESS = 4
 EXIT_INTERRUPTED = 130
