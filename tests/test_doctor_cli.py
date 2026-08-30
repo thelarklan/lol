@@ -178,6 +178,32 @@ def test_doctor_refuses_noninteractive_repair_without_yes(
     assert "interactive terminal or --yes" in str(result.exception)
 
 
+def test_doctor_never_repairs_manual_lock_failure(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _prepare(repository, monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "lol.cli.analyze",
+        lambda config, state: [
+            Finding(
+                "plugins.lock",
+                "blocker",
+                "locked artifacts could not be verified",
+                recommendation="Restore access to the LOL cache and rerun doctor.",
+                repair_scope="manual",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "lol.cli.create_lock", lambda config: pytest.fail("manual findings must not be repaired")
+    )
+
+    result = CliRunner().invoke(cli, ["doctor", "--fix", "--yes"])
+
+    assert result.exit_code != 0
+    assert "Doctor result: Blocked" in result.output
+
+
 def test_doctor_verbose_includes_evidence(
     repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

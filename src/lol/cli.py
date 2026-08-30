@@ -467,7 +467,9 @@ def _lock_repair(findings: list[Finding]) -> Finding | None:
         (
             finding
             for finding in findings
-            if finding.check == "plugins.lock" and finding.status in {"blocker", "recommendation"}
+            if finding.check == "plugins.lock"
+            and finding.status in {"blocker", "recommendation"}
+            and finding.repair_scope == "lol-owned"
         ),
         None,
     )
