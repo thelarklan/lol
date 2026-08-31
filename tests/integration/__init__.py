@@ -1,0 +1,1 @@
+"""Pinned-controller acceptance tests."""

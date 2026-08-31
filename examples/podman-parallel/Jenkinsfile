@@ -1,0 +1,19 @@
+pipeline {
+    agent any
+    stages {
+        stage('Parallel containers') {
+            parallel {
+                stage('One') {
+                    steps {
+                        sh 'podman run --rm "${LOL_TEST_IMAGE:-docker.io/library/alpine:3.22}" true'
+                    }
+                }
+                stage('Two') {
+                    steps {
+                        sh 'podman run --rm "${LOL_TEST_IMAGE:-docker.io/library/alpine:3.22}" true'
+                    }
+                }
+            }
+        }
+    }
+}

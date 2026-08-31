@@ -4,14 +4,9 @@ LOL is a local Jenkins harness for running a repository's real `Jenkinsfile` on 
 
 It creates an isolated, reproducible Jenkins controller, uses the controller's built-in node to execute the pipeline on the host, and leaves workload orchestration to the repository. If the pipeline normally launches several rootless Podman containers in parallel, it can do the same locally.
 
-> **Project status:** implementation in vertical slices. Packaging, configuration inspection,
-> deterministic Jenkins/plugin locking, guided repository initialization, and host diagnostics are
-> executable. Immutable run snapshots and repository-scoped trust records are also available as
-> foundations for pipeline execution. The loopback-only Jenkins controller lifecycle is executable
-> through `up`, `status`, `open`, `down`, and `reset`. Authenticated Jenkins APIs, durable private
-> run records, safe artifact handling, and streaming secret redaction now power the end-to-end
-> `run`, `runs`, `logs`, `stop`, and `artifacts` workflows. Real-controller compatibility fixtures
-> and the release audit remain before the first supported release.
+> **Project status:** v0.1 release candidate. The complete command surface is executable and the
+> required acceptance job runs declarative, scripted, parameterized, credentialed, artifact, result,
+> restart/reset, dirty-snapshot, and parallel rootless-Podman fixtures against the pinned Jenkins LTS.
 
 ## Why LOL?
 
@@ -38,10 +33,12 @@ flowchart TD
 ## Installation
 
 LOL requires Python 3.11 or newer. The recommended installation uses
-[pipx](https://pipx.pypa.io/stable/installation/):
+[pipx](https://pipx.pypa.io/stable/installation/) so the command and Python dependencies remain
+isolated. Until the first release is published, install a checkout or its built wheel:
 
 ```bash
 pipx install .
+# or: pipx install dist/launch_on_local-*.whl
 lol --version
 ```
 
@@ -105,10 +102,25 @@ check performs no network access and fails if the lock is missing or stale.
 
 - Linux
 - Git
-- A Java runtime supported by the selected Jenkins release
+- Java 21 or Java 25
 - Rootless Podman when the repository's workloads require it
 
 LOL verifies the exact requirements before starting Jenkins.
+
+To exercise the complete flow in a disposable second repository, copy the basic example, initialize
+Git, create the exact lock, and run it:
+
+```bash
+cp -R examples/basic /tmp/lol-basic
+git -C /tmp/lol-basic init -b main
+git -C /tmp/lol-basic add .
+git -C /tmp/lol-basic -c user.name=LOL -c user.email=lol@example.invalid \
+  commit -m 'Try LOL'
+cd /tmp/lol-basic
+lol lock --yes
+lol doctor --check
+lol run --trust-repository --non-interactive
+```
 
 ### 1. Initialize the repository
 
@@ -327,6 +339,16 @@ lol reset
 
 `down` prompts only when a pipeline is still active. `reset` always previews the generated state it will remove and requires confirmation unless `--yes` is supplied.
 
+## Security boundary
+
+`lol run` executes the repository's Jenkinsfile as the current user. It can access anything that
+user can access, just like running repository scripts directly. LOL requires an explicit first-run
+trust decision for each repository identity; ordinary `--yes` never grants that trust.
+
+Only run reviewed Jenkinsfiles and dependencies. Jenkins and the snapshot transport bind to
+loopback, controller environment inheritance is allowlisted, project state is isolated, and secrets
+are redacted, but LOL is not a sandbox for untrusted pull requests.
+
 ## Running Podman workloads
 
 Podman is not required to run the LOL controller. It is a host capability that a repository may require.
@@ -438,4 +460,30 @@ Those cases will be supported later through additional agent backends without ch
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [CLI reference](docs/cli.md)
 - [Python packaging decision](docs/decisions/0001-python-hatchling-package.md)
+- [Loopback snapshot decision](docs/decisions/0002-loopback-git-snapshot.md)
+
+## Development and release verification
+
+Hatch manages contributor checks and builds:
+
+```bash
+hatch run lint
+hatch run cov
+hatch build
+```
+
+The real-controller suite is opt-in locally because it downloads checksum-pinned Jenkins inputs and
+opens loopback ports. CI also requires its rootless-Podman path:
+
+```bash
+LOL_JENKINS_INTEGRATION=1 hatch run pytest tests/integration
+LOL_JENKINS_INTEGRATION=1 LOL_PODMAN_INTEGRATION=1 \
+  hatch run pytest tests/integration
+```
+
+Release tags must exactly match `project.version` (`v0.1.0` for version `0.1.0`). The release
+workflow reruns every gate, builds twice with `SOURCE_DATE_EPOCH`, compares distributions, emits
+SHA-256 checksums, smoke-installs the wheel, creates the GitHub release, and publishes to PyPI using
+trusted publishing.

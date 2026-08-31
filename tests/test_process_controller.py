@@ -260,6 +260,7 @@ def test_up_starts_loopback_controller_with_sanitized_environment(
     config = load_effective(repository)
     config.values["environment"] = {"pass": ["SAFE_VALUE"], "set": {"FIXED": "yes"}}
     paths = project_paths(tmp_path)
+    monkeypatch.setenv("HOME", "/home/developer")
     monkeypatch.setenv("SAFE_VALUE", "allowed")
     monkeypatch.setenv("SECRET_VALUE", "excluded")
     invocations, _ = _mock_startup(config, paths, monkeypatch, tmp_path)
@@ -271,6 +272,7 @@ def test_up_starts_loopback_controller_with_sanitized_environment(
     assert "--httpListenAddress=127.0.0.1" in command
     assert "--httpPort=12345" in command
     environment = invocations[0]["env"]
+    assert environment["HOME"] == "/home/developer"
     assert environment["SAFE_VALUE"] == "allowed"
     assert environment["FIXED"] == "yes"
     assert "SECRET_VALUE" not in environment

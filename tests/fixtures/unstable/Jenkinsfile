@@ -1,0 +1,12 @@
+pipeline {
+    agent any
+    stages {
+        stage('Unstable') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                    sh 'exit 1'
+                }
+            }
+        }
+    }
+}

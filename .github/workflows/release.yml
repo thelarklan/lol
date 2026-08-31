@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      LOL_INTEGRATION_CACHE: /tmp/lol-integration-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.LOL_INTEGRATION_CACHE }}
+          key: >-
+            jenkins-${{ runner.os }}-${{ hashFiles('src/lol/constants.py',
+            'src/lol/lockfile.py', 'src/lol/schemas/plugin-lock-v1.schema.json') }}
+      - name: Install rootless Podman fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman busybox-static
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+      - run: python -m pip install hatch
+      - name: Verify tag matches package version
+        run: hatch run python -m lol.release "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME"
+      - run: hatch run lint
+      - run: hatch run cov
+      - name: Run pinned Jenkins and rootless Podman acceptance suite
+        run: >-
+          LOL_JENKINS_INTEGRATION=1 LOL_PODMAN_INTEGRATION=1
+          hatch run pytest tests/integration
+
+  build:
+    needs: acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install hatch
+      - name: Build twice and verify reproducibility
+        shell: bash
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export SOURCE_DATE_EPOCH
+          hatch run python -m build --outdir /tmp/lol-release-dist-a
+          hatch run python -m build --outdir /tmp/lol-release-dist-b
+          for artifact in /tmp/lol-release-dist-a/*; do
+            cmp "$artifact" "/tmp/lol-release-dist-b/$(basename "$artifact")"
+          done
+          mkdir dist
+          cp /tmp/lol-release-dist-a/*.whl /tmp/lol-release-dist-a/*.tar.gz dist/
+          (cd dist && sha256sum ./*.whl ./*.tar.gz > SHA256SUMS)
+      - name: Smoke-test built wheel
+        run: |
+          python -m venv /tmp/lol-release-smoke
+          /tmp/lol-release-smoke/bin/pip install dist/*.whl
+          /tmp/lol-release-smoke/bin/lol --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-distributions
+          path: dist
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          fi
+
+  pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/launch-on-local/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-distributions
+          path: release
+      - name: Select Python distributions
+        run: |
+          mkdir dist
+          cp release/*.whl release/*.tar.gz dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

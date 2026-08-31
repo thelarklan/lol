@@ -1,0 +1,6 @@
+pipeline {
+    agent any
+    stages {
+        stage('Fail') { steps { sh 'exit 1' } }
+    }
+}

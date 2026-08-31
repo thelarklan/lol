@@ -1,0 +1,22 @@
+version: 1
+jenkins:
+  version: pinned-lts
+  plugins:
+    - configuration-as-code
+    - credentials-binding
+    - git
+    - plain-credentials
+    - workflow-aggregator
+pipeline:
+  file: Jenkinsfile
+node:
+  executors: 1
+  labels:
+    - lol-local
+requirements:
+  commands:
+    - git
+  podman: false
+artifacts:
+  patterns:
+    - reports/**

@@ -10,7 +10,7 @@ This document defines the initial architecture, repository contract, component b
 
 ## 2. Status
 
-This is the architecture baseline for LOL v1.
+This is the implemented architecture and acceptance contract for LOL v1.
 
 The following decisions are accepted:
 
@@ -23,6 +23,8 @@ The following decisions are accepted:
 - Rootless Podman is a repository capability, not the LOL infrastructure runtime.
 - Interactive commands discover safe facts, prompt for material choices, and preview consequential actions.
 - Every interactive workflow has an equivalent deterministic noninteractive mode.
+- Immutable repository snapshots are served to Jenkins by a run-scoped loopback Git daemon.
+- V1 supports Linux with Java 21 or 25 and gates compatibility against one pinned Jenkins LTS.
 - Separate agents, remote hosts, and Kubernetes are future backends.
 
 ## 3. Goals
@@ -351,7 +353,7 @@ Secrets are accepted only through secure input or a credential provider. They mu
 - A nonzero pipeline status when Jenkins completes with failure, instability configured as failure, abort, or timeout.
 - A distinct nonzero harness status when LOL cannot provision or communicate with Jenkins.
 
-Exact numeric codes belong in the CLI reference once implementation begins.
+Exact numeric codes and command behavior are defined in the [CLI reference](cli.md).
 
 ### 10.5 Diagnostic and repair model
 
@@ -450,7 +452,13 @@ Ignored files and LOL-generated state are excluded. A clean committed run is ava
 
 The snapshot must be presented to Jenkins as an SCM source so common Jenkins behavior such as `checkout scm`, changelog generation, and repository-relative loading continues to work.
 
-The exact local SCM transport requires an implementation spike. Acceptable implementations must:
+LOL creates an immutable bare repository in the private run directory and serves it with an
+ephemeral `git daemon` bound to `127.0.0.1`. Jenkins uses that URL through ordinary `GitSCM`, so
+`checkout scm`, changelogs, and repository-relative loading retain their normal behavior. The
+daemon is stopped during run cleanup. [ADR 0002](decisions/0002-loopback-git-snapshot.md) records
+the decision and rejected alternatives.
+
+The implementation:
 
 - Avoid modifying the user's branch or index
 - Avoid creating user-visible commits
@@ -458,8 +466,6 @@ The exact local SCM transport requires an implementation spike. Acceptable imple
 - Prevent Jenkins from reading outside the snapshot
 - Work without external network access
 - Provide a stable SCM identity for the duration of the run
-
-This decision will be recorded as an architecture decision record before implementation is considered complete.
 
 ### 12.3 State locations
 
@@ -773,7 +779,7 @@ Creates the run-scoped SCM source and reconciles the generated Pipeline job.
 
 Persists run metadata, console output, results, and artifact indexes independently of controller availability.
 
-## 23. Proposed repository layout
+## 23. Repository layout
 
 The v1 implementation is a Python 3.11+ package built with Hatchling. The repository preserves
 these conceptual boundaries:
@@ -785,24 +791,22 @@ lol/
 │   ├── architecture.md
 │   ├── cli.md
 │   └── decisions/
-├── schemas/
-│   ├── lol-v1.schema.json
-│   └── plugin-lock-v1.schema.json
 ├── examples/
 │   ├── basic/
 │   └── podman-parallel/
-├── src/
-│   ├── cli/
-│   ├── config/
-│   ├── doctor/
-│   ├── distribution/
-│   ├── jenkins/
-│   ├── project/
-│   └── runs/
+├── src/lol/
+│   ├── schemas/
+│   ├── cli.py
+│   ├── config.py
+│   ├── controller.py
+│   ├── doctor.py
+│   ├── jenkins.py
+│   ├── runner.py
+│   └── runs.py
 └── tests/
-    ├── unit/
     ├── integration/
-    └── fixtures/
+    ├── fixtures/
+    └── test_*.py
 ```
 
 Language-specific conventions may rename `src` and test directories without changing the component boundaries.
@@ -832,7 +836,7 @@ Language-specific conventions may rename `src` and test directories without chan
 - Create and run a Pipeline job
 - Stream console output
 - Run parallel shell stages
-- Run parallel rootless Podman workloads when available
+- Run parallel rootless Podman workloads in the required Linux acceptance job
 - Stop and restart while preserving state
 - Reset and recreate deterministic configuration
 - Diagnose and repair a fixable environment issue
@@ -881,23 +885,27 @@ execution:
 
 The local profile maps these requirements to the built-in node. Future profiles may map them to Podman agents, remote hosts, virtual machines, or Kubernetes pods.
 
-## 26. Open architecture decisions
+## 26. V1 implementation decisions
 
-The following require focused implementation spikes or explicit decisions:
-
-1. Local SCM snapshot transport used by Pipeline from SCM
-2. Jenkins job materialization API
-3. Plugin resolver and lock-file implementation
-4. Supported Jenkins core range and upgrade policy
-5. Artifact download versus index-only behavior
-6. Credential providers and secret-injection interface
-7. Windows and macOS support strategy
-8. Behavior for Git submodules and large-file storage
-9. Stable numeric CLI exit codes
-10. Privileged repair execution policy by supported operating system
-11. Credential-provider interface and temporary-secret lifetime
-
-These decisions should be recorded under `docs/decisions/` as architecture decision records.
+- LOL is distributed as the `launch-on-local` Python package with a `lol` console entry point.
+  [ADR 0001](decisions/0001-python-hatchling-package.md) records the packaging decision.
+- Every release supports one exact Jenkins LTS. Other exact versions may be locked on a best-effort
+  basis but are outside the compatibility promise. Upgrades are explicit.
+- The checksum-pinned official Jenkins Plugin Installation Manager resolves dependencies. LOL locks
+  and verifies the WAR, resolver, plugin versions, canonical URLs, and SHA-256 hashes.
+- Run-scoped repositories use the loopback Git transport in
+  [ADR 0002](decisions/0002-loopback-git-snapshot.md).
+- Pipeline jobs are reconciled through authenticated Jenkins `createItem` and `config.xml` HTTP
+  endpoints rather than by editing a live `JENKINS_HOME`.
+- Matching artifacts are downloaded into private run state with size and SHA-256 metadata, so
+  controller reset does not remove them.
+- Secret-text and username/password credentials may be created for one run and are deleted during
+  cleanup. Persistent providers and additional credential types are deferred.
+- Exit statuses are `0` for success, `1` for a non-successful Pipeline, `2` for usage or
+  configuration, `3` for blocked or unsupported hosts, `4` for harness failures, and `130` for
+  interruption.
+- V1 is Linux-only. Submodules, Git LFS hydration, macOS, and Windows are explicitly unsupported.
+- Privileged repairs are displayed as manual guidance; v1 never executes them.
 
 ## 27. Definition of the v1 architecture milestone
 
@@ -909,3 +917,7 @@ lol run
 ```
 
 and receive the same Jenkins result, logs, and artifacts from a disposable pinned local controller, including when the Jenkinsfile launches several rootless Podman workload containers in parallel.
+
+The required `jenkins-integration` CI job proves this contract against the release-pinned Jenkins
+LTS, declarative and scripted fixtures, parameters, temporary credentials, dirty snapshots,
+artifacts, result mappings, restart/reset behavior, and two parallel rootless Podman workloads.
