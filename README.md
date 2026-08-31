@@ -7,7 +7,8 @@ It creates an isolated, reproducible Jenkins controller, uses the controller's b
 > **Project status:** implementation in vertical slices. Packaging, configuration inspection,
 > deterministic Jenkins/plugin locking, guided repository initialization, and host diagnostics are
 > executable. Immutable run snapshots and repository-scoped trust records are also available as
-> foundations for pipeline execution.
+> foundations for pipeline execution. The loopback-only Jenkins controller lifecycle is executable
+> through `up`, `status`, `open`, `down`, and `reset`.
 
 ## Why LOL?
 
