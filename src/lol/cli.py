@@ -30,6 +30,11 @@ from lol.constants import (
     MANIFEST_NAME,
     PINNED_JENKINS_VERSION,
 )
+from lol.controller import ControllerStatus, open_ui
+from lol.controller import down as controller_down
+from lol.controller import reset as controller_reset
+from lol.controller import status as controller_status
+from lol.controller import up as controller_up
 from lol.discovery import discover, initial_manifest
 from lol.doctor import Finding, analyze, final_state
 from lol.errors import ConfigError, InteractionError, LolError
@@ -530,6 +535,86 @@ def doctor_command(context: Context, check_only: bool, fix: bool, yes: bool, ver
         click.echo(f"Doctor result: {state}")
     if state in {"Blocked", "Unsupported"}:
         raise LolError(f"host is {state.lower()}", EXIT_HOST)
+
+
+def _controller_payload(identity: ProjectIdentity, state: ControllerStatus) -> dict[str, object]:
+    value = state.as_dict()
+    value["project_id"] = identity.project_id
+    return value
+
+
+@cli.command("up")
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0.1),
+    default=120.0,
+    show_default=True,
+    help="Seconds to wait for Jenkins startup.",
+)
+@click.pass_obj
+def up_command(context: Context, timeout: float) -> None:
+    """Create or start the repository's local Jenkins controller."""
+    config, identity, paths = _resolved_project()
+    context.emit(_controller_payload(identity, controller_up(config, paths, timeout=timeout)))
+
+
+@cli.command("status")
+@click.pass_obj
+def status_command(context: Context) -> None:
+    """Show the repository's local controller status."""
+    _, identity, paths = _resolved_project()
+    context.emit(_controller_payload(identity, controller_status(paths)))
+
+
+@cli.command("open")
+@click.pass_obj
+def open_command(context: Context) -> None:
+    """Open the repository's local Jenkins controller in a browser."""
+    _, identity, paths = _resolved_project()
+    endpoint = open_ui(paths)
+    context.emit({"project_id": identity.project_id, "endpoint": endpoint})
+
+
+@cli.command("down")
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0.1),
+    default=30.0,
+    show_default=True,
+    help="Seconds to wait for Jenkins shutdown.",
+)
+@click.pass_obj
+def down_command(context: Context, timeout: float) -> None:
+    """Stop Jenkins while preserving the repository's generated state."""
+    _, identity, paths = _resolved_project()
+    context.emit(_controller_payload(identity, controller_down(paths, timeout=timeout)))
+
+
+@cli.command("reset")
+@click.option("--yes", is_flag=True, help="Confirm removal of the displayed generated state.")
+@click.pass_obj
+def reset_command(context: Context, yes: bool) -> None:
+    """Recreate generated controller state from pinned configuration."""
+    config, identity, paths = _resolved_project()
+    targets = [str(paths.controller), str(paths.runtime)]
+    if context.output_format != "json":
+        click.echo("Generated controller state will be removed and recreated:")
+        for target in targets:
+            click.echo(f"  {target}")
+        click.echo(f"Preserved run history: {paths.runs}")
+    if not yes:
+        if context.output_format == "json" or not _is_interactive():
+            raise InteractionError(
+                "reset confirmation is unavailable; review the targets and use --yes"
+            )
+        if not click.confirm("Reset this generated controller state?", default=False):
+            raise InteractionError("reset cancelled")
+    controller_reset(paths)
+    result = controller_up(config, paths)
+    payload = _controller_payload(identity, result)
+    payload["reset_targets"] = targets
+    payload["preserved_runs"] = str(paths.runs)
+    context.emit(payload)
 
 
 def main() -> None:
