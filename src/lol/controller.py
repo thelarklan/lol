@@ -215,29 +215,35 @@ def _wait_ready(
     process: subprocess.Popen[bytes],
     timeout: float,
     log_path: Path,
+    log_start: int,
 ) -> None:
     deadline = time.monotonic() + timeout
     last_error = ""
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise HarnessError(f"Jenkins exited during startup with status {process.returncode}")
-        if log_path.exists():
-            with log_path.open("rb") as log:
-                log.seek(max(0, log_path.stat().st_size - 200_000))
-                recent = log.read().decode("utf-8", errors="replace")
-            if "Failed to initialize Jenkins" in recent:
+    with requests.Session() as session:
+        session.trust_env = False
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
                 raise HarnessError(
-                    f"Jenkins failed to initialize; inspect the controller log: {log_path}"
+                    f"Jenkins exited during startup with status {process.returncode}"
                 )
-        try:
-            response = requests.get(f"{endpoint}/login", timeout=2)
-            headers = {name.lower() for name in response.headers}
-            if response.status_code < 500 and {"x-jenkins", "x-hudson"} & headers:
-                return
-            last_error = f"endpoint did not identify itself as Jenkins ({response.status_code})"
-        except requests.RequestException as exc:
-            last_error = str(exc)
-        time.sleep(0.5)
+            if log_path.exists():
+                with log_path.open("rb") as log:
+                    size = os.fstat(log.fileno()).st_size
+                    log.seek(max(log_start, size - 200_000))
+                    recent = log.read().decode("utf-8", errors="replace")
+                if "Failed to initialize Jenkins" in recent:
+                    raise HarnessError(
+                        f"Jenkins failed to initialize; inspect the controller log: {log_path}"
+                    )
+            try:
+                response = session.get(f"{endpoint}/login", timeout=2)
+                headers = {name.lower() for name in response.headers}
+                if response.status_code < 500 and {"x-jenkins", "x-hudson"} & headers:
+                    return
+                last_error = f"endpoint did not identify itself as Jenkins ({response.status_code})"
+            except requests.RequestException as exc:
+                last_error = str(exc)
+            time.sleep(0.5)
     raise HarnessError(f"Jenkins did not become ready within {timeout:g}s: {last_error}")
 
 
@@ -389,7 +395,7 @@ def up(config: EffectiveConfig, paths: ProjectPaths, *, timeout: float = 120.0) 
                     },
                     mode=0o600,
                 )
-                _wait_ready(endpoint, process, timeout, log_path)
+                _wait_ready(endpoint, process, timeout, log_path, log_start)
             except KeyboardInterrupt:
                 _terminate(process)
                 _runtime_file(paths).unlink(missing_ok=True)

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from lol.config import EffectiveConfig, load_effective
 from lol.controller import (
     ControllerStatus,
+    _prepare_home,
+    _wait_ready,
     credentials,
     down,
     open_ui,
@@ -125,6 +128,32 @@ def test_controller_credentials_reject_world_readable_file(tmp_path: Path) -> No
         credentials(paths)
 
 
+def test_prepare_home_installs_only_digest_verified_locked_plugins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = project_paths(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    content = b"locked plugin"
+    digest = hashlib.sha256(content).hexdigest()
+    source = tmp_path / "xdg-cache" / "lol" / "plugins" / "git" / "1.0" / "git.jpi"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(content)
+    lock = {
+        "jenkins": {"version": "1.0"},
+        "plugins": [{"id": "git", "version": "1.0", "sha256": digest}],
+    }
+
+    war = _prepare_home(paths, lock)
+
+    installed = paths.jenkins_home / "plugins" / "git.jpi"
+    assert installed.read_bytes() == content
+    assert installed.stat().st_mode & 0o777 == 0o600
+    assert war == tmp_path / "xdg-cache" / "lol" / "jenkins" / "1.0" / "jenkins.war"
+    (paths.jenkins_home / "plugins" / "stray.hpi").write_bytes(b"stray")
+    with pytest.raises(HarnessError, match="not present in lock: stray.hpi"):
+        _prepare_home(paths, lock)
+
+
 class FakeProcess:
     def __init__(self, pid: int) -> None:
         self.pid = pid
@@ -145,6 +174,51 @@ class FakeProcess:
         assert timeout is None or timeout > 0
         self.returncode = self.returncode if self.returncode is not None else 0
         return self.returncode
+
+
+class FakeResponse:
+    status_code = 200
+    headers = {"X-Jenkins": "2.0"}
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.trust_env = True
+        self.requests: list[str] = []
+
+    def __enter__(self) -> FakeSession:
+        return self
+
+    def __exit__(self, *values: object) -> None:
+        pass
+
+    def get(self, url: str, *, timeout: float) -> FakeResponse:
+        assert timeout == 2
+        assert not self.trust_env
+        self.requests.append(url)
+        return FakeResponse()
+
+
+def test_wait_ready_ignores_failure_from_previous_log_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_path = tmp_path / "controller.log"
+    log_path.write_text("Failed to initialize Jenkins\n", encoding="utf-8")
+    log_start = log_path.stat().st_size
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write("Starting a healthy controller\n")
+    session = FakeSession()
+    monkeypatch.setattr("lol.controller.requests.Session", lambda: session)
+
+    _wait_ready(
+        "http://127.0.0.1:1234",
+        cast(subprocess.Popen[bytes], FakeProcess(42)),
+        1,
+        log_path,
+        log_start,
+    )
+
+    assert session.requests == ["http://127.0.0.1:1234/login"]
 
 
 def _mock_startup(
@@ -220,6 +294,7 @@ def test_up_retries_only_after_current_attempt_port_conflict(
         process: subprocess.Popen[bytes],
         timeout: float,
         log_path: Path,
+        log_start: int,
     ) -> None:
         nonlocal attempts
         attempts += 1
