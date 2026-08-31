@@ -1,0 +1,9 @@
+node('lol-local') {
+    checkout scm
+    stage('Parallel') {
+        parallel(
+            first: { sh 'true' },
+            second: { sh 'true' }
+        )
+    }
+}

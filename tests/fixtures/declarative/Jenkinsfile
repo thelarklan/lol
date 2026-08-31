@@ -1,0 +1,23 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh 'printf "fixture\\n" > result.txt'
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'result.txt', fingerprint: true
+        }
+    }
+}

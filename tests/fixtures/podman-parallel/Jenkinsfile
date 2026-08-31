@@ -1,0 +1,15 @@
+pipeline {
+    agent any
+    stages {
+        stage('Podman parallel') {
+            parallel {
+                stage('One') {
+                    steps { sh 'podman run --rm localhost/lol-fixture:latest true' }
+                }
+                stage('Two') {
+                    steps { sh 'podman run --rm localhost/lol-fixture:latest true' }
+                }
+            }
+        }
+    }
+}

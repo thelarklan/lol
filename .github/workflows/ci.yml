@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,3 +33,34 @@ jobs:
       - run: python -m pip install pipx
       - run: PIPX_HOME=/tmp/pipx-home PIPX_BIN_DIR=/tmp/pipx-bin pipx install dist/*.whl
       - run: /tmp/pipx-bin/lol --version
+
+  jenkins-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      LOL_INTEGRATION_CACHE: /tmp/lol-integration-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.LOL_INTEGRATION_CACHE }}
+          key: >-
+            jenkins-${{ runner.os }}-${{ hashFiles('src/lol/constants.py',
+            'src/lol/lockfile.py', 'src/lol/schemas/plugin-lock-v1.schema.json') }}
+      - name: Install rootless Podman fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman busybox-static
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+      - run: python -m pip install hatch
+      - name: Run pinned Jenkins and rootless Podman acceptance suite
+        run: >-
+          LOL_JENKINS_INTEGRATION=1 LOL_PODMAN_INTEGRATION=1
+          hatch run pytest tests/integration

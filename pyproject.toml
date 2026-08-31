@@ -54,10 +54,12 @@ test = "pytest {args:tests}"
 cov = "pytest --cov=lol --cov-report=term-missing --cov-fail-under=50 {args:tests}"
 lint = ["ruff check .", "ruff format --check .", "mypy src tests"]
 build = "python -m build"
+integration = "LOL_JENKINS_INTEGRATION=1 pytest {args:tests/integration}"
 
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+markers = ["integration: requires pinned Jenkins inputs, Java, and loopback sockets"]
 
 [tool.ruff]
 line-length = 100

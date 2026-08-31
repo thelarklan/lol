@@ -1,0 +1,15 @@
+pipeline {
+    agent any
+    stages {
+        stage('Test') {
+            steps {
+                sh 'mkdir -p reports && printf "passed\\n" > reports/result.txt'
+            }
+        }
+    }
+    post {
+        always {
+            archiveArtifacts artifacts: 'reports/**'
+        }
+    }
+}

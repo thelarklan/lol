@@ -338,7 +338,7 @@ def up(config: EffectiveConfig, paths: ProjectPaths, *, timeout: float = 120.0) 
                 "controller environment cannot override reserved variables: " + ", ".join(reserved)
             )
         allowed_environment = {
-            "HOME": str(paths.state),
+            "HOME": os.environ.get("HOME", str(paths.state)),
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "JENKINS_HOME": str(paths.jenkins_home),

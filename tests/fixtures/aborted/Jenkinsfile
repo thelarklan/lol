@@ -1,0 +1,12 @@
+pipeline {
+    agent any
+    stages {
+        stage('Abort') {
+            steps {
+                catchError(buildResult: 'ABORTED', stageResult: 'ABORTED') {
+                    sh 'exit 1'
+                }
+            }
+        }
+    }
+}
