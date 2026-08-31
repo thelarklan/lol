@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import shutil
+import stat
 import tempfile
 import urllib.parse
 from pathlib import Path, PurePosixPath
@@ -153,6 +155,38 @@ def download_artifacts(
     except OSError as exc:
         raise HarnessError(f"could not write artifact index: {index_path}") from exc
     return index
+
+
+def load_artifact_index(record: RunRecord) -> dict[str, Any]:
+    path = record.directory / "artifacts.json"
+    if not path.exists() and not path.is_symlink():
+        return {"artifacts": []}
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise HarnessError(f"cannot read artifact index: {path}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o077
+        ):
+            raise HarnessError(f"unsafe artifact index: {path}")
+        with os.fdopen(descriptor, encoding="utf-8") as handle:
+            descriptor = -1
+            value = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise HarnessError(f"invalid artifact index: {path}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(value, dict) or not isinstance(value.get("artifacts"), list):
+        raise HarnessError(f"invalid artifact index: {path}")
+    return value
 
 
 def _reject_symlink_ancestors(base: Path, relative: Path) -> None:

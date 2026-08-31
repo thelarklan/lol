@@ -8,7 +8,13 @@ from typing import Any, cast
 
 import pytest
 
-from lol.artifacts import copy_artifacts, download_artifacts, matches, safe_relative
+from lol.artifacts import (
+    copy_artifacts,
+    download_artifacts,
+    load_artifact_index,
+    matches,
+    safe_relative,
+)
 from lol.errors import HarnessError
 from lol.jenkins import JenkinsClient
 from lol.paths import AppPaths, ProjectPaths
@@ -139,6 +145,22 @@ def test_download_artifacts_filters_encodes_hashes_and_closes_response(tmp_path:
     assert "/artifact/reports/result%20one.txt" in client.requests[-1]
     assert client.downloads[0].closed
     assert matches("reports/result one.txt", ["reports/*.txt"])
+
+
+def test_artifact_index_is_loaded_privately_and_rejects_symlink(tmp_path: Path) -> None:
+    project = paths(tmp_path)
+    record = create_run(project, {"status": "completed"})
+    index_path = record.directory / "artifacts.json"
+    index_path.write_text('{"artifacts": []}\n', encoding="utf-8")
+    index_path.chmod(0o600)
+    assert load_artifact_index(record) == {"artifacts": []}
+
+    index_path.unlink()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"artifacts": []}\n', encoding="utf-8")
+    index_path.symlink_to(outside)
+    with pytest.raises(HarnessError, match="cannot read artifact index"):
+        load_artifact_index(record)
 
 
 def test_download_rejects_duplicate_or_traversing_artifact_paths(tmp_path: Path) -> None:

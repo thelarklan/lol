@@ -9,7 +9,9 @@ It creates an isolated, reproducible Jenkins controller, uses the controller's b
 > executable. Immutable run snapshots and repository-scoped trust records are also available as
 > foundations for pipeline execution. The loopback-only Jenkins controller lifecycle is executable
 > through `up`, `status`, `open`, `down`, and `reset`. Authenticated Jenkins APIs, durable private
-> run records, safe artifact handling, and streaming secret redaction are ready for run execution.
+> run records, safe artifact handling, and streaming secret redaction now power the end-to-end
+> `run`, `runs`, `logs`, `stop`, and `artifacts` workflows. Real-controller compatibility fixtures
+> and the release audit remain before the first supported release.
 
 ## Why LOL?
 
@@ -274,6 +276,39 @@ Use a different Jenkinsfile or committed revision when needed:
 lol run --jenkinsfile ci/Jenkinsfile
 lol run --revision origin/main
 ```
+
+Secret values are supplied by secure prompt, standard input, or an environment variable; the value
+itself never belongs in the command line:
+
+```bash
+lol run --secret-parameter API_TOKEN=prompt
+lol run --secret-parameter API_TOKEN=env:LOCAL_API_TOKEN
+```
+
+Run-scoped Jenkins credentials use the same source model and are removed when the run finishes:
+
+```bash
+lol run --credential signing-token=secret-text:env:LOCAL_SIGNING_TOKEN
+lol run --credential registry=username-password:env:REGISTRY_USER,REGISTRY_PASSWORD
+```
+
+LOL stores only parameter names and credential IDs in private run metadata. Secret values are
+redacted across console chunk boundaries before output is displayed or written to `console.log`.
+Only one pipeline run may own a project's generated Jenkins job at a time, preventing one snapshot
+from replacing another run's job definition.
+
+Reconnect to recorded runs, retrieve their downloaded artifacts, or cancel an active build:
+
+```bash
+lol runs
+lol logs --follow
+lol artifacts --run <run-id> --output ./lol-artifacts
+lol stop --run <run-id> --yes
+```
+
+`lol run` returns `0` for Jenkins `SUCCESS`, `1` for other completed pipeline results (including
+`FAILURE`, `UNSTABLE`, and `ABORTED`), `2` for usage or interaction errors, `3` for host-readiness
+failures, `4` for harness failures, and `130` when interrupted.
 
 ### 5. Inspect or stop the environment
 

@@ -16,6 +16,10 @@ HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 RESERVED_HEADERS = {"authorization", "content-length", "content-type", "cookie", "host"}
 
 
+class QueueCancelled(HarnessError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class Build:
     number: int
@@ -340,7 +344,7 @@ class JenkinsClient:
             )
             value = self._json_object(response, "read Jenkins queue item")
             if value.get("cancelled"):
-                raise HarnessError("Jenkins cancelled the queued build")
+                raise QueueCancelled("Jenkins cancelled the queued build")
             executable = value.get("executable")
             if isinstance(executable, dict):
                 try:
@@ -376,6 +380,13 @@ class JenkinsClient:
             str(value["result"]) if value.get("result") is not None else None,
         )
 
+    def wait_until_complete(self, build_url: str) -> Build:
+        build = self.build(build_url)
+        while build.building:
+            time.sleep(0.25)
+            build = self.build(build_url)
+        return build
+
     def console_chunks(self, build_url: str, *, follow: bool = True) -> Iterator[str]:
         build = self._controller_url(build_url, "stream Jenkins console")
         offset = 0
@@ -398,7 +409,9 @@ class JenkinsClient:
                 raise HarnessError("Jenkins returned console text without advancing its offset")
             offset = next_offset
             more = response.headers.get("X-More-Data", "false").lower() == "true"
-            if not follow or not more:
+            if not follow:
+                return
+            if not more and not self.build(build).building:
                 return
             time.sleep(0.25)
 
@@ -408,6 +421,13 @@ class JenkinsClient:
         if not path:
             raise HarnessError("could not stop Jenkins build: build URL has no path")
         self.post(f"{path}/stop")
+
+    def cancel_queue(self, queue_url: str) -> None:
+        queue = self._controller_url(queue_url, "cancel Jenkins queue item")
+        match = re.fullmatch(r"/queue/item/([0-9]+)/?", urllib.parse.urlsplit(queue).path)
+        if match is None:
+            raise HarnessError("could not cancel Jenkins queue item: invalid queue URL")
+        self.post("queue/cancelItem", data={"id": match.group(1)})
 
     def parameter_definitions(self, job: str) -> list[dict[str, Any]]:
         encoded = urllib.parse.quote(job, safe="")

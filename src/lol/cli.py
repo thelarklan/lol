@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,7 @@ import click
 import yaml
 
 from lol import __version__
+from lol.artifacts import copy_artifacts, load_artifact_index
 from lol.config import (
     DEFAULTS,
     EffectiveConfig,
@@ -31,6 +34,7 @@ from lol.constants import (
     PINNED_JENKINS_VERSION,
 )
 from lol.controller import ControllerStatus, open_ui
+from lol.controller import credentials as controller_credentials
 from lol.controller import down as controller_down
 from lol.controller import reset as controller_reset
 from lol.controller import status as controller_status
@@ -39,9 +43,19 @@ from lol.discovery import discover, initial_manifest
 from lol.doctor import Finding, analyze, final_state
 from lol.errors import ConfigError, InteractionError, LolError
 from lol.io import write_yaml, write_yaml_bundle
+from lol.jenkins import JenkinsClient
 from lol.lockfile import create_lock, ensure_lock_cache, load_lock
 from lol.paths import ProjectPaths
 from lol.project import ProjectIdentity, find_repository, project_identity
+from lol.runner import (
+    RESERVED_PARAMETERS,
+    TemporaryCredential,
+    execute,
+    load_parameter_definitions,
+    read_console,
+)
+from lol.runs import RunRecord, list_runs, load_run
+from lol.trust import is_trusted, trust
 
 
 class Context:
@@ -561,9 +575,20 @@ def up_command(context: Context, timeout: float) -> None:
 @cli.command("status")
 @click.pass_obj
 def status_command(context: Context) -> None:
-    """Show the repository's local controller status."""
+    """Show the repository's local controller and latest run status."""
     _, identity, paths = _resolved_project()
-    context.emit(_controller_payload(identity, controller_status(paths)))
+    current = controller_status(paths)
+    payload = _controller_payload(identity, current)
+    records = list_runs(paths)
+    latest: dict[str, Any] | None = None
+    if records:
+        latest = dict(records[0].metadata)
+        if latest.get("status") in {"provisioning", "queued", "running", "stopping"} and (
+            current.state != "running"
+        ):
+            latest["status"] = "stale"
+    payload["latest_run"] = latest
+    context.emit(payload)
 
 
 @cli.command("open")
@@ -583,11 +608,390 @@ def open_command(context: Context) -> None:
     show_default=True,
     help="Seconds to wait for Jenkins shutdown.",
 )
+@click.option("--yes", is_flag=True, help="Stop without prompting when a run is active.")
 @click.pass_obj
-def down_command(context: Context, timeout: float) -> None:
+def down_command(context: Context, timeout: float, yes: bool) -> None:
     """Stop Jenkins while preserving the repository's generated state."""
     _, identity, paths = _resolved_project()
+    active = _active_runs(paths)
+    if active and not yes:
+        if context.output_format == "json" or not _is_interactive():
+            raise InteractionError("a pipeline is active; inspect it and use --yes to stop Jenkins")
+        if not click.confirm("A pipeline is active. Stop Jenkins?", default=False):
+            raise InteractionError("shutdown cancelled")
     context.emit(_controller_payload(identity, controller_down(paths, timeout=timeout)))
+
+
+def _active_runs(paths: ProjectPaths) -> list[RunRecord]:
+    if controller_status(paths).state != "running":
+        return []
+    return [
+        record
+        for record in list_runs(paths)
+        if record.metadata.get("status") in {"provisioning", "queued", "running", "stopping"}
+    ]
+
+
+def _select_record(
+    paths: ProjectPaths,
+    run_id: str | None,
+    *,
+    active: bool = False,
+    latest: bool = False,
+    allow_prompt: bool = True,
+) -> RunRecord:
+    if run_id:
+        record = load_run(paths, run_id)
+        if active and record.run_id not in {item.run_id for item in _active_runs(paths)}:
+            raise ConfigError(f"run is not active: {record.run_id}")
+        return record
+    records = _active_runs(paths) if active else list_runs(paths)
+    if not records:
+        raise ConfigError("no matching LOL runs are recorded")
+    if len(records) == 1 or latest:
+        return records[0]
+    if not allow_prompt or not _is_interactive():
+        raise InteractionError("multiple runs match; use --run <id>")
+    click.echo("Select a run:")
+    for index, record in enumerate(records, 1):
+        click.echo(
+            f"  {index}. {record.run_id} "
+            f"({record.metadata.get('status', '-')}/{record.metadata.get('result', '-')})"
+        )
+    selected = click.prompt("Run", type=click.IntRange(1, len(records)), default=1)
+    return records[selected - 1]
+
+
+def _parse_pair(value: str, option: str) -> tuple[str, str]:
+    if "=" not in value:
+        raise ConfigError(f"{option} requires KEY=VALUE")
+    key, result = value.split("=", 1)
+    if not key or key.strip() != key or any(ord(character) < 32 for character in key):
+        raise ConfigError(f"{option} requires a non-empty key without outer whitespace")
+    return key, result
+
+
+def _secret_source(
+    source: str,
+    *,
+    interactive: bool,
+    allow_stdin: bool = True,
+    prompt: str = "Secret",
+) -> str:
+    if source == "prompt":
+        if not interactive:
+            raise InteractionError("secure prompt is unavailable; use env:NAME or stdin")
+        return str(click.prompt(prompt, hide_input=True, confirmation_prompt=False))
+    if source == "stdin" and allow_stdin:
+        value = sys.stdin.readline()
+        if value == "":
+            raise InteractionError("secret input ended before a value was read")
+        return value.rstrip("\n")
+    if source.startswith("env:"):
+        name = source[4:]
+        if not name or name not in os.environ:
+            raise InteractionError(f"secret environment variable is unavailable: {name}")
+        return os.environ[name]
+    raise ConfigError(f"unsupported secret source: {source}")
+
+
+def _credential(value: str, *, interactive: bool) -> TemporaryCredential:
+    credential_id, specification = _parse_pair(value, "--credential")
+    if specification.startswith("secret-text:"):
+        source = specification[len("secret-text:") :]
+        return TemporaryCredential(
+            credential_id,
+            "secret-text",
+            _secret_source(
+                source,
+                interactive=interactive,
+                prompt=f"Secret for {credential_id}",
+            ),
+        )
+    if specification == "username-password:prompt":
+        if not interactive:
+            raise InteractionError("username/password prompt is unavailable")
+        username = str(click.prompt(f"Username for {credential_id}"))
+        password = str(click.prompt(f"Password for {credential_id}", hide_input=True))
+        return TemporaryCredential(credential_id, "username-password", password, username)
+    prefix = "username-password:env:"
+    if specification.startswith(prefix):
+        names = specification[len(prefix) :].split(",")
+        if len(names) != 2 or any(not name or name not in os.environ for name in names):
+            raise InteractionError(
+                "username-password env source requires two available variables: "
+                "USER_VAR,PASSWORD_VAR"
+            )
+        return TemporaryCredential(
+            credential_id,
+            "username-password",
+            os.environ[names[1]],
+            os.environ[names[0]],
+        )
+    raise ConfigError(
+        "credential must use secret-text:prompt|stdin|env:NAME, "
+        "username-password:prompt, or username-password:env:USER_VAR,PASSWORD_VAR"
+    )
+
+
+def _resolve_learned_parameters(
+    paths: ProjectPaths,
+    configured: set[str],
+    parameters: dict[str, str],
+    secret_parameters: dict[str, str],
+    *,
+    interactive: bool,
+) -> None:
+    missing: list[str] = []
+    for definition in load_parameter_definitions(paths):
+        name = str(definition.get("name") or "")
+        if (
+            not name
+            or name.startswith("LOL_")
+            or name in configured
+            or name in parameters
+            or name in secret_parameters
+            or isinstance(definition.get("defaultParameterValue"), dict)
+        ):
+            continue
+        if not interactive:
+            missing.append(name)
+            continue
+        kind = str(definition.get("_class") or "")
+        if kind.endswith("PasswordParameterDefinition"):
+            secret_parameters[name] = str(
+                click.prompt(f"Secret pipeline parameter {name}", hide_input=True)
+            )
+        else:
+            parameters[name] = str(click.prompt(f"Pipeline parameter {name}"))
+    if missing:
+        raise InteractionError(
+            "required pipeline parameters are missing: "
+            + ", ".join(sorted(missing))
+            + "; supply --parameter or --secret-parameter"
+        )
+
+
+@cli.command("run")
+@click.option("--revision", help="Run a committed Git revision instead of the working tree.")
+@click.option("--jenkinsfile", help="Use a repository-relative Jenkinsfile for this run.")
+@click.option("--parameter", "parameter_values", multiple=True, metavar="KEY=VALUE")
+@click.option(
+    "--secret-parameter",
+    "secret_values",
+    multiple=True,
+    metavar="KEY=prompt|stdin|env:NAME",
+)
+@click.option("--credential", "credential_values", multiple=True)
+@click.option("--trust-repository", is_flag=True, help="Record trust without prompting.")
+@click.option("--non-interactive", is_flag=True, help="Disable every prompt.")
+@click.option("--controller-timeout", type=click.FloatRange(min=0.1), default=120.0)
+@click.option("--queue-timeout", type=click.FloatRange(min=0.1), default=60.0)
+@click.pass_obj
+def run_command(
+    context: Context,
+    revision: str | None,
+    jenkinsfile: str | None,
+    parameter_values: tuple[str, ...],
+    secret_values: tuple[str, ...],
+    credential_values: tuple[str, ...],
+    trust_repository: bool,
+    non_interactive: bool,
+    controller_timeout: float,
+    queue_timeout: float,
+) -> None:
+    """Snapshot the repository and run its Jenkinsfile."""
+    config, identity, paths = _resolved_project()
+    prompts_allowed = not non_interactive and context.output_format != "json" and _is_interactive()
+    if not is_trusted(paths.state, identity):
+        if trust_repository:
+            trust(paths.state, identity)
+        elif not prompts_allowed:
+            raise InteractionError(
+                "repository is not trusted; review it and pass --trust-repository explicitly"
+            )
+        else:
+            click.echo(
+                "This Jenkinsfile executes with your user privileges and can access your files "
+                "and host commands."
+            )
+            if not click.confirm("Trust and run this repository?", default=False):
+                raise InteractionError("repository was not trusted")
+            trust(paths.state, identity)
+    if jenkinsfile:
+        candidate = Path(jenkinsfile)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ConfigError("--jenkinsfile must be a repository-relative path without '..'")
+    parameter_pairs = [_parse_pair(item, "--parameter") for item in parameter_values]
+    if len({key for key, _ in parameter_pairs}) != len(parameter_pairs):
+        raise ConfigError("--parameter keys must be unique")
+    parameters = dict(parameter_pairs)
+    secret_pairs = [_parse_pair(item, "--secret-parameter") for item in secret_values]
+    if len({key for key, _ in secret_pairs}) != len(secret_pairs):
+        raise ConfigError("--secret-parameter keys must be unique")
+    collisions = set(parameters) & {key for key, _ in secret_pairs}
+    if collisions:
+        raise ConfigError(
+            "a parameter cannot be both secret and non-secret: " + ", ".join(sorted(collisions))
+        )
+    supplied_reserved = (set(parameters) | {key for key, _ in secret_pairs}) & RESERVED_PARAMETERS
+    if supplied_reserved:
+        raise ConfigError("reserved LOL parameter: " + ", ".join(sorted(supplied_reserved)))
+    secret_parameters = {
+        key: _secret_source(
+            source,
+            interactive=prompts_allowed,
+            prompt=f"Secret pipeline parameter {key}",
+        )
+        for key, source in secret_pairs
+    }
+    configured = {str(key) for key in config.values["pipeline"].get("parameters", {})}
+    _resolve_learned_parameters(
+        paths,
+        configured,
+        parameters,
+        secret_parameters,
+        interactive=prompts_allowed,
+    )
+    temporary = [_credential(item, interactive=prompts_allowed) for item in credential_values]
+    identifiers = [item.credential_id for item in temporary]
+    if len(identifiers) != len(set(identifiers)):
+        raise ConfigError("--credential IDs must be unique")
+    if context.output_format != "json":
+        click.echo("Run plan:")
+        click.echo(f"  Repository: {config.root}")
+        click.echo(f"  Revision: {revision or 'working tree snapshot'}")
+        click.echo(f"  Jenkinsfile: {jenkinsfile or config.values['pipeline']['file']}")
+        click.echo(f"  Parameters: {', '.join(sorted(parameters)) or '-'}")
+        click.echo(f"  Secret parameters: {', '.join(sorted(secret_parameters)) or '-'}")
+        click.echo(f"  Temporary credentials: {', '.join(sorted(identifiers)) or '-'}")
+    emit = (
+        (lambda value: click.echo(value, nl=False))
+        if context.output_format == "text"
+        else (lambda _: None)
+    )
+    exit_code, record = execute(
+        config,
+        identity,
+        paths,
+        revision=revision,
+        jenkinsfile=jenkinsfile,
+        parameters=parameters,
+        secret_parameters=secret_parameters,
+        temporary_credentials=temporary,
+        emit=emit,
+        controller_timeout=controller_timeout,
+        queue_timeout=queue_timeout,
+    )
+    if context.output_format == "json":
+        context.emit({"run": record.metadata})
+    else:
+        click.echo(f"Run {record.run_id}: {record.metadata.get('result')}")
+    if exit_code:
+        raise LolError(f"pipeline result: {record.metadata.get('result')}", exit_code)
+
+
+@cli.command("runs")
+@click.pass_obj
+def runs_command(context: Context) -> None:
+    """List recorded runs."""
+    _, _, paths = _resolved_project()
+    records = [record.metadata for record in list_runs(paths)]
+    if context.output_format == "json":
+        context.emit({"runs": records})
+    elif not records:
+        click.echo("No runs recorded.")
+    else:
+        for value in records:
+            click.echo(f"{value['run_id']}  {value.get('status', '-')}  {value.get('result', '-')}")
+
+
+@cli.command("logs")
+@click.option("--run", "run_id")
+@click.option("--follow", is_flag=True)
+@click.pass_obj
+def logs_command(context: Context, run_id: str | None, follow: bool) -> None:
+    """Read or follow redacted pipeline console output."""
+    if follow and context.output_format == "json":
+        raise ConfigError("--format json cannot be combined with logs --follow")
+    _, _, paths = _resolved_project()
+    record = _select_record(paths, run_id, latest=True)
+    offset = 0
+    collected: list[str] = []
+    while True:
+        chunk, offset = read_console(record, offset)
+        if chunk:
+            if context.output_format == "json":
+                collected.append(chunk)
+            else:
+                click.echo(chunk, nl=False)
+        if not follow:
+            break
+        record = load_run(paths, record.run_id)
+        if record.metadata.get("status") not in {"provisioning", "queued", "running", "stopping"}:
+            break
+        if controller_status(paths).state != "running":
+            break
+        time.sleep(0.25)
+    if context.output_format == "json":
+        context.emit({"run_id": record.run_id, "console": "".join(collected)})
+
+
+@cli.command("stop")
+@click.option("--run", "run_id")
+@click.option("--yes", is_flag=True)
+@click.pass_obj
+def stop_command(context: Context, run_id: str | None, yes: bool) -> None:
+    """Cancel an active pipeline or queued build."""
+    _, identity, paths = _resolved_project()
+    record = _select_record(
+        paths,
+        run_id,
+        active=True,
+        allow_prompt=context.output_format != "json",
+    )
+    if not yes:
+        if context.output_format == "json" or not _is_interactive():
+            raise InteractionError(f"stopping run {record.run_id} requires confirmation; use --yes")
+        if not click.confirm(f"Stop run {record.run_id}?", default=False):
+            raise InteractionError("cancellation cancelled")
+    current = controller_status(paths)
+    if current.state != "running" or not current.endpoint:
+        raise ConfigError("controller is not running")
+    username, password = controller_credentials(paths)
+    previous_status = str(record.metadata.get("status") or "running")
+    record.update(status="stopping")
+    try:
+        with JenkinsClient(current.endpoint, username, password) as client:
+            build_url = record.metadata.get("jenkins_url")
+            queue_url = record.metadata.get("jenkins_queue")
+            if isinstance(build_url, str) and build_url:
+                client.stop(build_url)
+            elif isinstance(queue_url, str) and queue_url:
+                client.cancel_queue(queue_url)
+            else:
+                raise ConfigError(f"run cannot yet be cancelled: {record.run_id}")
+    except Exception:
+        record.update(status=previous_status)
+        raise
+    context.emit({"project_id": identity.project_id, "run_id": record.run_id, "status": "stopping"})
+
+
+@cli.command("artifacts")
+@click.option("--run", "run_id")
+@click.option("--output", type=click.Path(path_type=Path))
+@click.pass_obj
+def artifacts_command(context: Context, run_id: str | None, output: Path | None) -> None:
+    """List or copy downloaded run artifacts."""
+    _, _, paths = _resolved_project()
+    record = _select_record(paths, run_id, allow_prompt=context.output_format != "json")
+    value = load_artifact_index(record)
+    if output:
+        copied = copy_artifacts(record, output)
+        context.emit({"run_id": record.run_id, "copied": [str(path) for path in copied]})
+    else:
+        value["run_id"] = record.run_id
+        context.emit(value)
 
 
 @cli.command("reset")

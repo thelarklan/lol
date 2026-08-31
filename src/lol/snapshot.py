@@ -157,6 +157,9 @@ def uses_lfs(root: Path) -> bool:
 
 
 def create_snapshot(root: Path, run_dir: Path, revision: str | None = None) -> Snapshot:
+    selected = revision or "HEAD"
+    if selected.startswith("-"):
+        raise HarnessError("Git revision must not begin with '-'")
     if (root / ".gitmodules").exists():
         raise HarnessError("Git submodules are unsupported in v1 snapshots")
     if uses_lfs(root):
@@ -166,8 +169,17 @@ def create_snapshot(root: Path, run_dir: Path, revision: str | None = None) -> S
     if repository.exists():
         shutil.rmtree(repository)
     _run(["git", "clone", "--bare", "--no-hardlinks", str(root), str(repository)])
-    selected = revision or "HEAD"
-    base = _run(["git", "-C", str(root), "rev-parse", f"{selected}^{{commit}}"])
+    base = _run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{selected}^{{commit}}",
+        ]
+    )
     if revision:
         commit = base
         tree = _run(["git", f"--git-dir={repository}", "show", "-s", "--format=%T", commit])
