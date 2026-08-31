@@ -8,7 +8,8 @@ It creates an isolated, reproducible Jenkins controller, uses the controller's b
 > deterministic Jenkins/plugin locking, guided repository initialization, and host diagnostics are
 > executable. Immutable run snapshots and repository-scoped trust records are also available as
 > foundations for pipeline execution. The loopback-only Jenkins controller lifecycle is executable
-> through `up`, `status`, `open`, `down`, and `reset`.
+> through `up`, `status`, `open`, `down`, and `reset`. Authenticated Jenkins APIs, durable private
+> run records, safe artifact handling, and streaming secret redaction are ready for run execution.
 
 ## Why LOL?
 
