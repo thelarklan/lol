@@ -985,11 +985,11 @@ def artifacts_command(context: Context, run_id: str | None, output: Path | None)
     """List or copy downloaded run artifacts."""
     _, _, paths = _resolved_project()
     record = _select_record(paths, run_id, allow_prompt=context.output_format != "json")
-    value = load_artifact_index(record)
     if output:
         copied = copy_artifacts(record, output)
         context.emit({"run_id": record.run_id, "copied": [str(path) for path in copied]})
     else:
+        value = load_artifact_index(record)
         value["run_id"] = record.run_id
         context.emit(value)
 

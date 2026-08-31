@@ -294,6 +294,8 @@ def test_artifacts_lists_and_copies_run_scoped_files(
     )
 
     listed = CliRunner().invoke(cli, ["--format", "json", "artifacts", "--run", record.run_id])
+    assert json.loads(listed.output)["artifacts"][0]["path"] == "reports/result.txt"
+    (record.directory / "artifacts.json").write_text("not valid json\n", encoding="utf-8")
     output = tmp_path / "output"
     copied = CliRunner().invoke(
         cli,
@@ -308,7 +310,6 @@ def test_artifacts_lists_and_copies_run_scoped_files(
         ],
     )
 
-    assert json.loads(listed.output)["artifacts"][0]["path"] == "reports/result.txt"
     assert copied.exit_code == 0, copied.output
     assert (output / "reports" / "result.txt").read_text(encoding="utf-8") == "result"
 

@@ -307,8 +307,9 @@ lol stop --run <run-id> --yes
 ```
 
 `lol run` returns `0` for Jenkins `SUCCESS`, `1` for other completed pipeline results (including
-`FAILURE`, `UNSTABLE`, and `ABORTED`), `2` for usage or interaction errors, `3` for host-readiness
-failures, `4` for harness failures, and `130` when interrupted.
+`FAILURE`, `UNSTABLE`, and `ABORTED`), `2` for usage or interaction errors, `4` for harness
+failures, and `130` when interrupted. The read-only `lol doctor --check` command uses `3` when host
+readiness is blocked or unsupported.
 
 ### 5. Inspect or stop the environment
 
