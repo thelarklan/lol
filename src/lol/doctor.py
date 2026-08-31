@@ -15,6 +15,7 @@ from lol.config import EffectiveConfig
 from lol.constants import LOCK_NAME, SUPPORTED_JAVA_VERSIONS
 from lol.errors import LolError
 from lol.lockfile import load_lock, verify_lock_cache
+from lol.snapshot import uses_lfs
 
 Status = Literal["pass", "recommendation", "warning", "blocker", "unsupported"]
 
@@ -245,12 +246,9 @@ def analyze(config: EffectiveConfig, state_path: Path) -> list[Finding]:
                 "Git submodules are not supported in v1 snapshots",
             )
         )
-    attributes = config.root / ".gitattributes"
     try:
-        attribute_text = (
-            attributes.read_text(encoding="utf-8", errors="replace") if attributes.exists() else ""
-        )
-    except OSError as exc:
+        lfs = uses_lfs(config.root)
+    except LolError as exc:
         findings.append(
             Finding(
                 "scm.attributes",
@@ -261,8 +259,8 @@ def analyze(config: EffectiveConfig, state_path: Path) -> list[Finding]:
                 "manual",
             )
         )
-        attribute_text = ""
-    if "filter=lfs" in attribute_text:
+        lfs = False
+    if lfs:
         findings.append(
             Finding("scm.lfs", "unsupported", "Git LFS hydration is not supported in v1")
         )

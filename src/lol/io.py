@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from collections.abc import Sequence
@@ -22,6 +23,10 @@ def atomic_write(path: Path, content: str, *, mode: int = 0o644) -> None:
         os.replace(temp_path, path)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def write_json(path: Path, value: Any, *, mode: int = 0o644) -> None:
+    atomic_write(path, json.dumps(value, indent=2, sort_keys=True) + "\n", mode=mode)
 
 
 def write_yaml(path: Path, value: Any, *, mode: int = 0o644) -> None:
@@ -54,3 +59,11 @@ def write_yaml_bundle(entries: Sequence[tuple[Path, Any]], *, mode: int = 0o644)
                 content, original_mode = original
                 atomic_write(path, content, mode=original_mode)
         raise
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} does not contain a JSON object")
+    return value
