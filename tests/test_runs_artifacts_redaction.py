@@ -245,3 +245,19 @@ def test_redactor_without_overlap_streams_immediately() -> None:
     single = StreamingRedactor(["x"])
     assert single.feed("axb") == "a****b"
     assert single.finish() == ""
+
+
+def test_streaming_redaction_handles_overlapping_secrets_deterministically() -> None:
+    text = "ABCDEFXY"
+    secrets = ["AB", "BC", "CDEF"]
+    for first in range(len(text) + 1):
+        for second in range(first, len(text) + 1):
+            redactor = StreamingRedactor(secrets)
+            output = (
+                redactor.feed(text[:first])
+                + redactor.feed(text[first:second])
+                + redactor.feed(text[second:])
+                + redactor.finish()
+            )
+            assert output == "********XY"
+            assert all(secret not in output for secret in secrets)

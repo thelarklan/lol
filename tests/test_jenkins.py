@@ -239,6 +239,19 @@ def test_build_and_console_stream_validate_metadata() -> None:
     assert chunks == ["first", "second"]
 
 
+def test_console_rejects_text_without_offset_progress() -> None:
+    client = client_with(
+        Session(
+            lambda url: Response(
+                headers={"X-Text-Size": "0", "X-More-Data": "true"}, text="duplicate"
+            )
+        )
+    )
+
+    with pytest.raises(HarnessError, match="without advancing"):
+        list(client.console_chunks("http://127.0.0.1:8080/job/fixture/7/"))
+
+
 def test_credentials_are_escaped_and_delete_id_is_encoded() -> None:
     def respond(url: str) -> Response:
         if "crumbIssuer" in url:

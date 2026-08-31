@@ -394,6 +394,8 @@ class JenkinsClient:
                 raise HarnessError("Jenkins returned an invalid console offset") from exc
             if next_offset < offset:
                 raise HarnessError("Jenkins returned a regressing console offset")
+            if response.content and next_offset == offset:
+                raise HarnessError("Jenkins returned console text without advancing its offset")
             offset = next_offset
             more = response.headers.get("X-More-Data", "false").lower() == "true"
             if not follow or not more:
