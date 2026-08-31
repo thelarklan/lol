@@ -252,6 +252,80 @@ def test_console_rejects_text_without_offset_progress() -> None:
         list(client.console_chunks("http://127.0.0.1:8080/job/fixture/7/"))
 
 
+def test_console_follow_waits_through_idle_build_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progressive_calls = 0
+    build_calls = 0
+
+    def respond(url: str) -> Response:
+        nonlocal progressive_calls, build_calls
+        if "progressiveText" in url:
+            progressive_calls += 1
+            if progressive_calls == 1:
+                return Response(headers={"X-Text-Size": "0"})
+            return Response(headers={"X-Text-Size": "4"}, text="done")
+        if url.endswith("/api/json"):
+            build_calls += 1
+            return Response(
+                payload={
+                    "number": 7,
+                    "url": "http://127.0.0.1:8080/job/fixture/7/",
+                    "building": build_calls == 1,
+                    "result": None if build_calls == 1 else "SUCCESS",
+                }
+            )
+        return Response()
+
+    monkeypatch.setattr("lol.jenkins.time.sleep", lambda _: None)
+    client = client_with(Session(respond))
+
+    assert list(client.console_chunks("http://127.0.0.1:8080/job/fixture/7/")) == ["done"]
+    assert progressive_calls == 2
+    assert build_calls == 2
+
+
+def test_wait_until_complete_polls_until_build_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def respond(url: str) -> Response:
+        nonlocal calls
+        calls += 1
+        return Response(
+            payload={
+                "number": 7,
+                "url": "http://127.0.0.1:8080/job/fixture/7/",
+                "building": calls == 1,
+                "result": None if calls == 1 else "UNSTABLE",
+            }
+        )
+
+    monkeypatch.setattr("lol.jenkins.time.sleep", lambda _: None)
+    build = client_with(Session(respond)).wait_until_complete(
+        "http://127.0.0.1:8080/job/fixture/7/"
+    )
+    assert build.result == "UNSTABLE"
+    assert calls == 2
+
+
+def test_cancel_queue_validates_location_and_posts_item_id() -> None:
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+    client.cancel_queue("http://127.0.0.1:8080/queue/item/41/")
+
+    assert session.posts[-1][0].endswith("/queue/cancelItem")
+    assert session.posts[-1][1] == {"id": "41"}
+    with pytest.raises(HarnessError, match="invalid queue URL"):
+        client.cancel_queue("http://127.0.0.1:8080/job/fixture/41/")
+
+
 def test_credentials_are_escaped_and_delete_id_is_encoded() -> None:
     def respond(url: str) -> Response:
         if "crumbIssuer" in url:

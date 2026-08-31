@@ -165,3 +165,10 @@ def test_snapshot_ignores_commented_lfs_attributes(repository: Path, tmp_path: P
     snapshot = create_snapshot(repository, tmp_path / "run")
 
     assert snapshot.repository.is_dir()
+
+
+def test_snapshot_rejects_revision_that_could_be_a_git_option(
+    repository: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(HarnessError, match="must not begin"):
+        create_snapshot(repository, tmp_path / "run", "--help")
