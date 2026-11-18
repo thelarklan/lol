@@ -344,3 +344,69 @@ def test_credentials_are_escaped_and_delete_id_is_encoded() -> None:
     assert "<password>pass&lt;&amp;</password>" in xml
     assert "<description>lol:run&lt;&amp;</description>" in xml
     assert "/credential/id%2Fone/doDelete" in session.posts[1][0]
+
+
+def test_job_reconciliation_clears_learned_parameters_when_script_changes() -> None:
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if "parameterDefinitions" in url:
+            raise AssertionError("stale parameterDefinitions must not be inherited")
+        if url.endswith("/job/fixture/api/json"):
+            return Response(payload={"description": "Managed by LOL (Jenkinsfile)"})
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["NEW_PARAM"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<name>NEW_PARAM</name>" in xml
+    assert "<name>OLD_PARAM</name>" not in xml
+
+
+def test_job_reconciliation_preserves_learned_parameters_for_matching_script() -> None:
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if "parameterDefinitions" in url:
+            return Response(
+                payload={
+                    "property": [
+                        {
+                            "parameterDefinitions": [
+                                {
+                                    "name": "FLAG",
+                                    "_class": "hudson.model.BooleanParameterDefinition",
+                                    "defaultParameterValue": {"value": True},
+                                }
+                            ]
+                        }
+                    ]
+                }
+            )
+        if url.endswith("/job/fixture/api/json"):
+            return Response(payload={"description": "Managed by LOL (ci/Jenkinsfile)"})
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<hudson.model.BooleanParameterDefinition>" in xml
+    assert "<name>FLAG</name>" in xml

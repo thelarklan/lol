@@ -457,3 +457,18 @@ def test_execute_refuses_overlapping_run_for_same_project(
         )
 
     assert list_runs(paths)[0].metadata["status"] == "harness-failed"
+
+
+def test_parameter_metadata_is_scoped_by_script(tmp_path: Path) -> None:
+    _, _, paths = _project(tmp_path)
+    paths.runtime.mkdir(parents=True)
+    save_parameter_definitions(
+        paths,
+        [{"name": "TARGET", "_class": "hudson.model.StringParameterDefinition"}],
+        script="Jenkinsfile",
+    )
+    assert [item["name"] for item in load_parameter_definitions(paths, script="Jenkinsfile")] == [
+        "TARGET"
+    ]
+    assert load_parameter_definitions(paths, script="ci/Jenkinsfile") == []
+    assert [item["name"] for item in load_parameter_definitions(paths)] == ["TARGET"]

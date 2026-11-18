@@ -450,3 +450,16 @@ def test_config_edit_preserves_podman_command_and_honors_explicit_no(
         "commands": ["git", "podman"],
         "podman": False,
     }
+
+
+def test_config_edit_rejects_whitespace_jenkinsfile(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr("lol.cli._is_interactive", lambda: True)
+
+    result = CliRunner().invoke(cli, ["config", "edit"], input="   \n")
+
+    assert result.exit_code != 0
+    assert "Jenkinsfile must not be empty" in str(result.exception)

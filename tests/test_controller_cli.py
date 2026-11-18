@@ -115,3 +115,22 @@ def test_reset_yes_previews_preserves_runs_and_restarts(
     assert "Preserved run history:" in result.output
     assert "state: running" in result.output
     assert calls == ["reset", "up"]
+
+
+def test_down_force_passes_force_flag(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _prepare(repository, monkeypatch, tmp_path)
+    calls: list[tuple[float, bool]] = []
+
+    def stop(paths: object, *, timeout: float, force: bool = False) -> ControllerStatus:
+        calls.append((timeout, force))
+        return ControllerStatus("stopped")
+
+    monkeypatch.setattr("lol.cli.controller_down", stop)
+
+    result = CliRunner().invoke(cli, ["--format", "json", "down", "--timeout", "2", "--force"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["state"] == "stopped"
+    assert calls == [(2.0, True)]

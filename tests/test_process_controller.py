@@ -433,3 +433,48 @@ def test_reset_unlinks_controller_symlink_without_touching_target(tmp_path: Path
 
     assert not paths.controller.exists()
     assert marker.read_text(encoding="utf-8") == "yes"
+
+
+def test_down_raises_without_force_when_timeout_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = project_paths(tmp_path)
+    monkeypatch.setattr(
+        "lol.controller.status",
+        lambda value: ControllerStatus("running", "http://127.0.0.1:1234", 42),
+    )
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr("lol.controller.os.kill", lambda pid, sig: signals.append((pid, sig)))
+    ticks = iter([0.0, 0.1, 0.2])
+    monkeypatch.setattr("lol.controller.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("lol.controller.time.sleep", lambda _: None)
+
+    with pytest.raises(HarnessError, match="did not stop before the timeout"):
+        down(paths, timeout=0.1)
+
+    assert signals == [(42, 15)]
+
+
+def test_down_force_sends_sigkill_after_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = project_paths(tmp_path)
+    states = iter(
+        [
+            ControllerStatus("running", "http://127.0.0.1:1234", 42),
+            ControllerStatus("running", "http://127.0.0.1:1234", 42),
+            ControllerStatus("running", "http://127.0.0.1:1234", 42),
+            ControllerStatus("stopped"),
+        ]
+    )
+    monkeypatch.setattr("lol.controller.status", lambda value: next(states))
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr("lol.controller.os.kill", lambda pid, sig: signals.append((pid, sig)))
+    ticks = iter([0.0, 0.05, 0.2, 0.2, 0.25])
+    monkeypatch.setattr("lol.controller.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("lol.controller.time.sleep", lambda _: None)
+
+    result = down(paths, timeout=0.1, force=True)
+
+    assert result.state == "stopped"
+    assert signals == [(42, 15), (42, 9)]

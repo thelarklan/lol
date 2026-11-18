@@ -412,7 +412,7 @@ def up(config: EffectiveConfig, paths: ProjectPaths, *, timeout: float = 120.0) 
         raise HarnessError("could not allocate a Jenkins loopback port")
 
 
-def _down_locked(paths: ProjectPaths, *, timeout: float) -> ControllerStatus:
+def _down_locked(paths: ProjectPaths, *, timeout: float, force: bool = False) -> ControllerStatus:
     current = status(paths)
     runtime = _runtime_file(paths)
     if current.state != "running" or current.pid is None:
@@ -429,16 +429,33 @@ def _down_locked(paths: ProjectPaths, *, timeout: float) -> ControllerStatus:
             runtime.unlink(missing_ok=True)
             return ControllerStatus("stopped")
         time.sleep(0.2)
-    raise HarnessError("Jenkins did not stop before the timeout")
+    if not force:
+        raise HarnessError("Jenkins did not stop before the timeout")
+    latest = status(paths)
+    if latest.state != "running" or latest.pid is None:
+        runtime.unlink(missing_ok=True)
+        return ControllerStatus("stopped")
+    try:
+        os.kill(latest.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        runtime.unlink(missing_ok=True)
+        return ControllerStatus("stopped")
+    kill_deadline = time.monotonic() + min(timeout, 5.0)
+    while time.monotonic() < kill_deadline:
+        if status(paths).state == "stopped":
+            runtime.unlink(missing_ok=True)
+            return ControllerStatus("stopped")
+        time.sleep(0.1)
+    raise HarnessError("Jenkins did not stop after SIGKILL")
 
 
-def down(paths: ProjectPaths, *, timeout: float = 30.0) -> ControllerStatus:
+def down(paths: ProjectPaths, *, timeout: float = 30.0, force: bool = False) -> ControllerStatus:
     if timeout <= 0:
         raise HarnessError("controller shutdown timeout must be greater than zero")
     _ensure_private_directory(paths.state)
     _ensure_private_directory(paths.runtime)
     with exclusive_lock(paths.runtime / "lifecycle.lock"):
-        return _down_locked(paths, timeout=timeout)
+        return _down_locked(paths, timeout=timeout, force=force)
 
 
 def open_ui(paths: ProjectPaths) -> str:

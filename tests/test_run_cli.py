@@ -331,3 +331,32 @@ def test_down_refuses_to_stop_active_run_without_confirmation(
 
     assert result.exit_code != 0
     assert "a pipeline is active" in str(result.exception)
+
+
+def test_run_ignores_learned_parameters_from_another_jenkinsfile(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = _prepare(repository, monkeypatch, tmp_path)
+    paths.runtime.mkdir(parents=True)
+    save_parameter_definitions(
+        paths,
+        [{"name": "TARGET", "_class": "hudson.model.StringParameterDefinition"}],
+        script="Jenkinsfile",
+    )
+    FakeExecute.calls = []
+    FakeExecute.exit_code = EXIT_SUCCESS
+    monkeypatch.setattr("lol.cli.execute", FakeExecute.run)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "--jenkinsfile",
+            "ci/Jenkinsfile",
+            "--trust-repository",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert FakeExecute.calls[0]["jenkinsfile"] == "ci/Jenkinsfile"

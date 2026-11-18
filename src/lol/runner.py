@@ -181,17 +181,29 @@ def _safe_parameter_definitions(values: Sequence[dict[str, Any]]) -> list[dict[s
     return safe
 
 
-def save_parameter_definitions(paths: ProjectPaths, values: Sequence[dict[str, Any]]) -> None:
+def save_parameter_definitions(
+    paths: ProjectPaths,
+    values: Sequence[dict[str, Any]],
+    *,
+    script: str | None = None,
+) -> None:
     path = _parameter_metadata_path(paths)
     if path.is_symlink():
         raise HarnessError(f"pipeline parameter metadata is a symbolic link: {path}")
+    payload: dict[str, Any] = {"parameters": _safe_parameter_definitions(values)}
+    if script is not None:
+        payload["script"] = script
     try:
-        write_json(path, {"parameters": _safe_parameter_definitions(values)}, mode=0o600)
+        write_json(path, payload, mode=0o600)
     except OSError as exc:
         raise HarnessError(f"cannot write pipeline parameter metadata: {path}") from exc
 
 
-def load_parameter_definitions(paths: ProjectPaths) -> list[dict[str, Any]]:
+def load_parameter_definitions(
+    paths: ProjectPaths,
+    *,
+    script: str | None = None,
+) -> list[dict[str, Any]]:
     path = _parameter_metadata_path(paths)
     if not path.exists() and not path.is_symlink():
         return []
@@ -220,6 +232,9 @@ def load_parameter_definitions(paths: ProjectPaths) -> list[dict[str, Any]]:
             os.close(descriptor)
     if not isinstance(value, dict) or not isinstance(value.get("parameters"), list):
         raise HarnessError(f"invalid pipeline parameter metadata: {path}")
+    stored_script = value.get("script")
+    if script is not None and isinstance(stored_script, str) and stored_script != script:
+        return []
     return [item for item in value["parameters"] if isinstance(item, dict)]
 
 
@@ -380,7 +395,7 @@ def execute(
             record,
             [str(item) for item in config.values["artifacts"]["patterns"]],
         )
-        save_parameter_definitions(paths, client.parameter_definitions(job))
+        save_parameter_definitions(paths, client.parameter_definitions(job), script=script)
         record.update(
             status="completed",
             result=result,

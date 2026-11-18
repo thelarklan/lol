@@ -209,14 +209,23 @@ class JenkinsClient:
         except requests.RequestException as exc:
             raise HarnessError("could not inspect Pipeline job: Jenkins is unavailable") from exc
 
+        expected_description = f"Managed by LOL ({script})"
         learned: dict[str, dict[str, Any]] = {}
         if response.status_code != 404:
             self._check(response, "inspect Pipeline job")
-            learned = {
-                str(item.get("name")): item
-                for item in self.parameter_definitions(name)
-                if item.get("name") and not str(item.get("name")).startswith("LOL_")
-            }
+            job_info = self._json_object(response, "inspect Pipeline job")
+            description = job_info.get("description")
+            same_script = not (
+                isinstance(description, str)
+                and description.startswith("Managed by LOL (")
+                and description != expected_description
+            )
+            if same_script:
+                learned = {
+                    str(item.get("name")): item
+                    for item in self.parameter_definitions(name)
+                    if item.get("name") and not str(item.get("name")).startswith("LOL_")
+                }
         for parameter in parameters or ():
             learned.setdefault(parameter, {"name": parameter})
         for parameter in secret_parameters or ():
@@ -241,7 +250,7 @@ class JenkinsClient:
         xml = f"""<?xml version='1.1' encoding='UTF-8'?>
 <flow-definition plugin="workflow-job">
   <actions/>
-  <description>Managed by LOL</description>
+  <description>{escape(expected_description)}</description>
   <keepDependencies>false</keepDependencies>
   <properties>
     <jenkins.model.BuildDiscarderProperty>

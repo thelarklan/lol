@@ -52,8 +52,9 @@ required.
 - `lol up [--timeout SECONDS]` creates or starts the pinned loopback-only controller.
 - `lol status` reports controller state and the latest recorded run.
 - `lol open` opens the loopback Jenkins URL in the default browser.
-- `lol down [--timeout SECONDS] [--yes]` stops Jenkins while preserving generated state and run
-  history. An active run requires confirmation or `--yes`.
+- `lol down [--timeout SECONDS] [--yes] [--force]` stops Jenkins while preserving generated
+  state and run history. An active run requires confirmation or `--yes`, and `--force` sends
+  `SIGKILL` if Jenkins does not exit before the timeout.
 - `lol reset [--yes]` previews and removes generated controller/runtime state, preserves run history,
   and recreates the controller. Noninteractive use requires `--yes`.
 

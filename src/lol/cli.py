@@ -411,8 +411,12 @@ def config_edit(yes: bool) -> None:
     jenkins_version = str(repository_values["jenkins"]["version"])
     interactive = _is_interactive()
     if interactive and not yes:
-        jenkinsfile = click.prompt("Jenkinsfile", default=jenkinsfile)
-        jenkins_version = click.prompt("Jenkins version", default=jenkins_version)
+        jenkinsfile = str(click.prompt("Jenkinsfile", default=jenkinsfile)).strip()
+        if not jenkinsfile:
+            raise ConfigError("Jenkinsfile must not be empty")
+        jenkins_version = str(click.prompt("Jenkins version", default=jenkins_version)).strip()
+        if not jenkins_version:
+            raise ConfigError("Jenkins version must not be empty")
         label_text = click.prompt("Node labels (comma-separated)", default=",".join(labels))
         labels = tuple(item.strip() for item in label_text.split(",") if item.strip())
         require_podman = click.confirm("Require rootless Podman?", default=require_podman)
@@ -609,8 +613,13 @@ def open_command(context: Context) -> None:
     help="Seconds to wait for Jenkins shutdown.",
 )
 @click.option("--yes", is_flag=True, help="Stop without prompting when a run is active.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Send SIGKILL if Jenkins does not stop before the timeout.",
+)
 @click.pass_obj
-def down_command(context: Context, timeout: float, yes: bool) -> None:
+def down_command(context: Context, timeout: float, yes: bool, force: bool) -> None:
     """Stop Jenkins while preserving the repository's generated state."""
     _, identity, paths = _resolved_project()
     active = _active_runs(paths)
@@ -619,7 +628,12 @@ def down_command(context: Context, timeout: float, yes: bool) -> None:
             raise InteractionError("a pipeline is active; inspect it and use --yes to stop Jenkins")
         if not click.confirm("A pipeline is active. Stop Jenkins?", default=False):
             raise InteractionError("shutdown cancelled")
-    context.emit(_controller_payload(identity, controller_down(paths, timeout=timeout)))
+    state = (
+        controller_down(paths, timeout=timeout, force=True)
+        if force
+        else controller_down(paths, timeout=timeout)
+    )
+    context.emit(_controller_payload(identity, state))
 
 
 def _active_runs(paths: ProjectPaths) -> list[RunRecord]:
@@ -740,10 +754,11 @@ def _resolve_learned_parameters(
     parameters: dict[str, str],
     secret_parameters: dict[str, str],
     *,
+    script: str,
     interactive: bool,
 ) -> None:
     missing: list[str] = []
-    for definition in load_parameter_definitions(paths):
+    for definition in load_parameter_definitions(paths, script=script):
         name = str(definition.get("name") or "")
         if (
             not name
@@ -822,6 +837,9 @@ def run_command(
         candidate = Path(jenkinsfile)
         if candidate.is_absolute() or ".." in candidate.parts:
             raise ConfigError("--jenkinsfile must be a repository-relative path without '..'")
+        script = candidate.as_posix()
+    else:
+        script = Path(str(config.values["pipeline"]["file"])).as_posix()
     parameter_pairs = [_parse_pair(item, "--parameter") for item in parameter_values]
     if len({key for key, _ in parameter_pairs}) != len(parameter_pairs):
         raise ConfigError("--parameter keys must be unique")
@@ -851,6 +869,7 @@ def run_command(
         configured,
         parameters,
         secret_parameters,
+        script=script,
         interactive=prompts_allowed,
     )
     temporary = [_credential(item, interactive=prompts_allowed) for item in credential_values]
