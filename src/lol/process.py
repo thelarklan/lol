@@ -67,13 +67,22 @@ def process_start_time(pid: int) -> str | None:
     return fields[19]
 
 
+def _boot_id_matches(expected_boot_id: str | None) -> bool:
+    if expected_boot_id is None:
+        return True
+    current = boot_id()
+    if current is None:
+        raise HarnessError("cannot verify kernel boot ID")
+    return current == expected_boot_id
+
+
 def process_matches(
     pid: int,
     start_time: str,
     *,
     expected_boot_id: str | None = None,
 ) -> bool:
-    if expected_boot_id is not None and boot_id() != expected_boot_id:
+    if not _boot_id_matches(expected_boot_id):
         return False
     return process_start_time(pid) == start_time
 
@@ -123,7 +132,7 @@ def open_verified_process(
     if pid <= 0:
         yield None
         return
-    if expected_boot_id is not None and boot_id() != expected_boot_id:
+    if not _boot_id_matches(expected_boot_id):
         yield None
         return
     try:

@@ -167,8 +167,16 @@ def test_job_reconciliation_preserves_parameter_types_and_escapes_xml() -> None:
                     ]
                 }
             )
-        if url.endswith("/job/fixture/api/json"):
-            return Response(payload={"description": "Managed by LOL (ci/Jenkinsfile&more)"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(
+                text=(
+                    "<?xml version='1.1' encoding='UTF-8'?>"
+                    "<flow-definition>"
+                    "<description>Managed by LOL (ci/Jenkinsfile&amp;more)</description>"
+                    "<definition><scriptPath>ci/Jenkinsfile&amp;more</scriptPath></definition>"
+                    "</flow-definition>"
+                )
+            )
         return Response()
 
     session = Session(respond)
@@ -354,8 +362,16 @@ def test_job_reconciliation_clears_learned_parameters_when_script_changes() -> N
             return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
         if "parameterDefinitions" in url:
             raise AssertionError("stale parameterDefinitions must not be inherited")
-        if url.endswith("/job/fixture/api/json"):
-            return Response(payload={"description": "Managed by LOL (Jenkinsfile)"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(
+                text=(
+                    "<?xml version='1.1' encoding='UTF-8'?>"
+                    "<flow-definition>"
+                    "<description>Managed by LOL (Jenkinsfile)</description>"
+                    "<definition><scriptPath>Jenkinsfile</scriptPath></definition>"
+                    "</flow-definition>"
+                )
+            )
         return Response()
 
     session = Session(respond)
@@ -395,8 +411,16 @@ def test_job_reconciliation_preserves_learned_parameters_for_matching_script() -
                     ]
                 }
             )
-        if url.endswith("/job/fixture/api/json"):
-            return Response(payload={"description": "Managed by LOL (ci/Jenkinsfile)"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(
+                text=(
+                    "<?xml version='1.1' encoding='UTF-8'?>"
+                    "<flow-definition>"
+                    "<description>Managed by LOL (ci/Jenkinsfile)</description>"
+                    "<definition><scriptPath>ci/Jenkinsfile</scriptPath></definition>"
+                    "</flow-definition>"
+                )
+            )
         return Response()
 
     session = Session(respond)
@@ -514,26 +538,56 @@ def test_job_reconciliation_discards_legacy_job_parameters_when_script_changes()
     assert "<name>CURRENT</name>" in xml
 
 
+def test_job_reconciliation_ignores_stale_description_when_script_path_differs() -> None:
+    stale_config = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL (ci/Jenkinsfile)</description>"
+        "<definition><scriptPath>other/Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    )
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=stale_config)
+        if "parameterDefinitions" in url:
+            raise AssertionError("stale parameterDefinitions must not be inherited")
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["CURRENT"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<scriptPath>ci/Jenkinsfile</scriptPath>" in xml
+    assert "<name>CURRENT</name>" in xml
+
+
 @pytest.mark.parametrize(
-    ("description", "config_xml"),
+    "config_xml",
     [
-        (None, ""),
-        ("Managed by LOL", "<not-valid-xml"),
-        ("Managed by LOL", "<flow-definition><definition/></flow-definition>"),
+        "",
+        "<not-valid-xml",
+        "<project><definition><scriptPath>ci/Jenkinsfile</scriptPath></definition></project>",
+        "<flow-definition><definition/></flow-definition>",
     ],
 )
-def test_job_reconciliation_ignores_unverified_legacy_description(
-    description: str | None,
-    config_xml: str,
-) -> None:
+def test_job_reconciliation_ignores_unverified_config_xml(config_xml: str) -> None:
     def respond(url: str) -> Response:
         if "crumbIssuer" in url:
             return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
         if "parameterDefinitions" in url:
-            raise AssertionError("unverified legacy parameterDefinitions must not be inherited")
-        if url.endswith("/job/fixture/api/json"):
-            payload = {"description": description} if description is not None else {}
-            return Response(payload=payload)
+            raise AssertionError("unverified parameterDefinitions must not be inherited")
         if url.endswith("/job/fixture/config.xml"):
             return Response(text=config_xml)
         return Response()

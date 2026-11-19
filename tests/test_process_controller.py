@@ -692,6 +692,30 @@ def test_mismatched_boot_id_marks_status_stale_and_blocks_signaling(
     assert not (paths.runtime / "controller.json").exists()
 
 
+def test_unavailable_boot_id_preserves_live_controller_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = project_paths(tmp_path)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        start = process_start_time(proc.pid)
+        assert start is not None
+        _write_controller_runtime(paths, proc.pid, start, recorded_boot_id="recorded-boot")
+        monkeypatch.setattr("lol.process.boot_id", lambda: None)
+
+        with pytest.raises(HarnessError, match="cannot verify kernel boot ID"):
+            status(paths)
+        with pytest.raises(HarnessError, match="cannot verify kernel boot ID"):
+            down(paths, timeout=0.5, force=True)
+
+        assert proc.poll() is None
+        assert (paths.runtime / "controller.json").exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
 def test_pidfd_supported_handles_enosys_and_blocks_up(
     repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

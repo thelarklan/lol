@@ -204,7 +204,7 @@ class JenkinsClient:
         encoded = urllib.parse.quote(name, safe="")
         try:
             response = self.session.get(
-                self._url(f"job/{encoded}/api/json"),
+                self._url(f"job/{encoded}/config.xml"),
                 timeout=self.timeout,
                 allow_redirects=False,
             )
@@ -215,15 +215,7 @@ class JenkinsClient:
         learned: dict[str, dict[str, Any]] = {}
         if response.status_code != 404:
             self._check(response, "inspect Pipeline job")
-            job_info = self._json_object(response, "inspect Pipeline job")
-            description = job_info.get("description")
-            if description == expected_description:
-                same_script = True
-            elif description == "Managed by LOL":
-                same_script = self._configured_script(encoded) == script
-            else:
-                same_script = False
-            if same_script:
+            if self._configured_script(response.text) == script:
                 learned = {
                     str(item.get("name")): item
                     for item in self.parameter_definitions(name)
@@ -293,14 +285,13 @@ class JenkinsClient:
                 content_type="application/xml; charset=utf-8",
             )
 
-    def _configured_script(self, encoded_name: str) -> str | None:
-        response = self.get_response(
-            self._url(f"job/{encoded_name}/config.xml"),
-            action="read Pipeline job configuration",
-        )
+    @staticmethod
+    def _configured_script(config_xml: str) -> str | None:
         try:
-            root = ET.fromstring(response.text)
+            root = ET.fromstring(config_xml)
         except ET.ParseError:
+            return None
+        if root.tag != "flow-definition":
             return None
         script_path = root.findtext("definition/scriptPath")
         return script_path if script_path else None
