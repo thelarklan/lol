@@ -215,7 +215,7 @@ class JenkinsClient:
         learned: dict[str, dict[str, Any]] = {}
         if response.status_code != 404:
             self._check(response, "inspect Pipeline job")
-            if self._job_matches_script(response.text, script, expected_description):
+            if self._job_matches_script(response.content, script, expected_description):
                 learned = {
                     str(item.get("name")): item
                     for item in self.parameter_definitions(name)
@@ -287,7 +287,7 @@ class JenkinsClient:
 
     @staticmethod
     def _job_matches_script(
-        config_xml: str,
+        config_xml: bytes,
         script: str,
         expected_description: str,
     ) -> bool:

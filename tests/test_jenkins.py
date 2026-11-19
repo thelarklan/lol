@@ -18,13 +18,14 @@ class Response:
         *,
         headers: dict[str, str] | None = None,
         text: str = "",
+        content: bytes | None = None,
         chunks: tuple[bytes, ...] = (),
     ) -> None:
         self.status_code = status_code
         self.payload = {} if payload is None else payload
         self.headers = headers or {}
         self.text = text
-        self.content = text.encode()
+        self.content = text.encode() if content is None else content
         self.chunks = chunks
         self.closed = False
 
@@ -498,6 +499,61 @@ def test_job_reconciliation_preserves_legacy_job_parameters_for_same_script() ->
     assert (
         "<hudson.model.BooleanParameterDefinition>"
         "<name>SUPPLIED_BOOL</name><defaultValue>false</defaultValue>"
+        "</hudson.model.BooleanParameterDefinition>"
+    ) in xml
+
+
+def test_job_reconciliation_preserves_legacy_non_ascii_script_from_utf8_xml_bytes() -> None:
+    legacy_bytes = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL</description>"
+        "<definition><scriptPath>Café/Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    ).encode()
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/config.xml"):
+            # Simulate Requests decoding charset-less UTF-8 XML with the wrong text codec.
+            return Response(
+                text=legacy_bytes.decode("mac_roman"),
+                content=legacy_bytes,
+            )
+        if "parameterDefinitions" in url:
+            return Response(
+                payload={
+                    "property": [
+                        {
+                            "parameterDefinitions": [
+                                {
+                                    "name": "FLAG",
+                                    "_class": "hudson.model.BooleanParameterDefinition",
+                                    "defaultParameterValue": {"value": True},
+                                }
+                            ]
+                        }
+                    ]
+                }
+            )
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "Café/Jenkinsfile",
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (Café/Jenkinsfile)</description>" in xml
+    assert (
+        "<hudson.model.BooleanParameterDefinition>"
+        "<name>FLAG</name><defaultValue>true</defaultValue>"
         "</hudson.model.BooleanParameterDefinition>"
     ) in xml
 
