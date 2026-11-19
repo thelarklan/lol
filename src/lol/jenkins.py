@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import time
 import urllib.parse
@@ -36,8 +37,8 @@ class JenkinsClient:
         password: str,
         timeout: float = 20.0,
     ) -> None:
-        if timeout <= 0:
-            raise HarnessError("Jenkins request timeout must be greater than zero")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise HarnessError("Jenkins request timeout must be a finite number greater than zero")
         self.endpoint = self._validated_endpoint(endpoint)
         self.timeout = timeout
         self.session = requests.Session()
@@ -215,11 +216,7 @@ class JenkinsClient:
             self._check(response, "inspect Pipeline job")
             job_info = self._json_object(response, "inspect Pipeline job")
             description = job_info.get("description")
-            same_script = not (
-                isinstance(description, str)
-                and description.startswith("Managed by LOL (")
-                and description != expected_description
-            )
+            same_script = description == expected_description
             if same_script:
                 learned = {
                     str(item.get("name")): item
@@ -343,8 +340,8 @@ class JenkinsClient:
         return self._controller_url(location, "resolve Jenkins queue location")
 
     def wait_for_build(self, queue_url: str, timeout: float = 60.0) -> Build:
-        if timeout <= 0:
-            raise HarnessError("Jenkins queue timeout must be greater than zero")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise HarnessError("Jenkins queue timeout must be a finite number greater than zero")
         queue = self._controller_url(queue_url, "read Jenkins queue")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

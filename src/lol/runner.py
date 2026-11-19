@@ -233,7 +233,7 @@ def load_parameter_definitions(
     if not isinstance(value, dict) or not isinstance(value.get("parameters"), list):
         raise HarnessError(f"invalid pipeline parameter metadata: {path}")
     stored_script = value.get("script")
-    if script is not None and isinstance(stored_script, str) and stored_script != script:
+    if script is not None and stored_script != script:
         return []
     return [item for item in value["parameters"] if isinstance(item, dict)]
 

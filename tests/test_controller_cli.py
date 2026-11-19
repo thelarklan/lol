@@ -134,3 +134,33 @@ def test_down_force_passes_force_flag(
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["state"] == "stopped"
     assert calls == [(2.0, True)]
+
+
+@pytest.mark.parametrize(
+    ("command", "bad_timeout"),
+    [
+        ("up", "nan"),
+        ("up", "inf"),
+        ("down", "nan"),
+        ("down", "inf"),
+    ],
+)
+def test_up_and_down_cli_reject_non_finite_timeouts(
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command: str,
+    bad_timeout: str,
+) -> None:
+    _prepare(repository, monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "lol.cli.controller_up", lambda *args, **kwargs: pytest.fail("must not run")
+    )
+    monkeypatch.setattr(
+        "lol.cli.controller_down", lambda *args, **kwargs: pytest.fail("must not run")
+    )
+
+    result = CliRunner().invoke(cli, [command, "--timeout", bad_timeout])
+
+    assert result.exit_code != 0
+    assert "not a finite number" in result.output

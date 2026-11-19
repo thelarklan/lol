@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -56,6 +57,22 @@ from lol.runner import (
 )
 from lol.runs import RunRecord, list_runs, load_run
 from lol.trust import is_trusted, trust
+
+
+class _FiniteFloatRange(click.FloatRange):
+    def convert(
+        self,
+        value: Any,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> Any:
+        result = super().convert(value, param, ctx)
+        if isinstance(result, float) and not math.isfinite(result):
+            self.fail(f"{value!r} is not a finite number.", param, ctx)
+        return result
+
+
+TIMEOUT_OPTION = _FiniteFloatRange(min=0.1)
 
 
 class Context:
@@ -411,11 +428,15 @@ def config_edit(yes: bool) -> None:
     jenkins_version = str(repository_values["jenkins"]["version"])
     interactive = _is_interactive()
     if interactive and not yes:
-        jenkinsfile = str(click.prompt("Jenkinsfile", default=jenkinsfile)).strip()
-        if not jenkinsfile:
+        entered_jenkinsfile = str(click.prompt("Jenkinsfile", default=jenkinsfile))
+        if entered_jenkinsfile != jenkinsfile:
+            jenkinsfile = entered_jenkinsfile.strip()
+        if not jenkinsfile.strip():
             raise ConfigError("Jenkinsfile must not be empty")
-        jenkins_version = str(click.prompt("Jenkins version", default=jenkins_version)).strip()
-        if not jenkins_version:
+        entered_version = str(click.prompt("Jenkins version", default=jenkins_version))
+        if entered_version != jenkins_version:
+            jenkins_version = entered_version.strip()
+        if not jenkins_version.strip():
             raise ConfigError("Jenkins version must not be empty")
         label_text = click.prompt("Node labels (comma-separated)", default=",".join(labels))
         labels = tuple(item.strip() for item in label_text.split(",") if item.strip())
@@ -564,7 +585,7 @@ def _controller_payload(identity: ProjectIdentity, state: ControllerStatus) -> d
 @cli.command("up")
 @click.option(
     "--timeout",
-    type=click.FloatRange(min=0.1),
+    type=TIMEOUT_OPTION,
     default=120.0,
     show_default=True,
     help="Seconds to wait for Jenkins startup.",
@@ -607,7 +628,7 @@ def open_command(context: Context) -> None:
 @cli.command("down")
 @click.option(
     "--timeout",
-    type=click.FloatRange(min=0.1),
+    type=TIMEOUT_OPTION,
     default=30.0,
     show_default=True,
     help="Seconds to wait for Jenkins shutdown.",
@@ -800,8 +821,8 @@ def _resolve_learned_parameters(
 @click.option("--credential", "credential_values", multiple=True)
 @click.option("--trust-repository", is_flag=True, help="Record trust without prompting.")
 @click.option("--non-interactive", is_flag=True, help="Disable every prompt.")
-@click.option("--controller-timeout", type=click.FloatRange(min=0.1), default=120.0)
-@click.option("--queue-timeout", type=click.FloatRange(min=0.1), default=60.0)
+@click.option("--controller-timeout", type=TIMEOUT_OPTION, default=120.0)
+@click.option("--queue-timeout", type=TIMEOUT_OPTION, default=60.0)
 @click.pass_obj
 def run_command(
     context: Context,

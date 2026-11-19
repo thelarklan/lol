@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
 import shutil
@@ -24,7 +25,13 @@ from lol.errors import HarnessError
 from lol.io import write_json, write_yaml
 from lol.lockfile import ensure_lock_cache, load_lock
 from lol.paths import AppPaths, ProjectPaths
-from lol.process import exclusive_lock, process_matches, process_start_time
+from lol.process import (
+    VerifiedProcess,
+    exclusive_lock,
+    open_verified_process,
+    process_matches,
+    process_start_time,
+)
 
 TEMPLATE_VERSION = 1
 
@@ -289,8 +296,8 @@ def _terminate(process: subprocess.Popen[bytes], timeout: float = 5.0) -> None:
 
 
 def up(config: EffectiveConfig, paths: ProjectPaths, *, timeout: float = 120.0) -> ControllerStatus:
-    if timeout <= 0:
-        raise HarnessError("controller startup timeout must be greater than zero")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise HarnessError("controller startup timeout must be a finite number greater than zero")
     _ensure_private_directory(paths.state)
     _ensure_private_directory(paths.runtime)
     with exclusive_lock(paths.runtime / "lifecycle.lock"):
@@ -412,46 +419,64 @@ def up(config: EffectiveConfig, paths: ProjectPaths, *, timeout: float = 120.0) 
         raise HarnessError("could not allocate a Jenkins loopback port")
 
 
-def _down_locked(paths: ProjectPaths, *, timeout: float, force: bool = False) -> ControllerStatus:
-    current = status(paths)
+def _read_running_identity(paths: ProjectPaths) -> tuple[int, str] | None:
     runtime = _runtime_file(paths)
-    if current.state != "running" or current.pid is None:
-        runtime.unlink(missing_ok=True)
-        return ControllerStatus("stopped")
+    if not runtime.exists() and not runtime.is_symlink():
+        return None
     try:
-        os.kill(current.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        runtime.unlink(missing_ok=True)
-        return ControllerStatus("stopped")
+        value = _read_private_json(runtime)
+        pid = int(value["pid"])
+        start_time = str(value["process_start_time"])
+        endpoint = _loopback_endpoint(value.get("endpoint"))
+        if pid <= 0 or not start_time or endpoint is None:
+            raise ValueError("invalid controller metadata")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return pid, start_time
+
+
+def _wait_stopped(proc: VerifiedProcess, timeout: float, *, interval: float) -> bool:
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if status(paths).state == "stopped":
-            runtime.unlink(missing_ok=True)
-            return ControllerStatus("stopped")
-        time.sleep(0.2)
-    if not force:
-        raise HarnessError("Jenkins did not stop before the timeout")
-    latest = status(paths)
-    if latest.state != "running" or latest.pid is None:
+    while True:
+        if not proc.is_running():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(interval, remaining))
+
+
+def _down_locked(paths: ProjectPaths, *, timeout: float, force: bool = False) -> ControllerStatus:
+    runtime = _runtime_file(paths)
+    identity = _read_running_identity(paths)
+    if identity is None:
         runtime.unlink(missing_ok=True)
         return ControllerStatus("stopped")
-    try:
-        os.kill(latest.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        runtime.unlink(missing_ok=True)
-        return ControllerStatus("stopped")
-    kill_deadline = time.monotonic() + min(timeout, 5.0)
-    while time.monotonic() < kill_deadline:
-        if status(paths).state == "stopped":
+    pid, start_time = identity
+    with open_verified_process(pid, start_time) as proc:
+        if proc is None:
             runtime.unlink(missing_ok=True)
             return ControllerStatus("stopped")
-        time.sleep(0.1)
+        if not proc.send_signal(signal.SIGTERM):
+            runtime.unlink(missing_ok=True)
+            return ControllerStatus("stopped")
+        if _wait_stopped(proc, timeout, interval=0.2):
+            runtime.unlink(missing_ok=True)
+            return ControllerStatus("stopped")
+        if not force:
+            raise HarnessError("Jenkins did not stop before the timeout")
+        if not proc.send_signal(signal.SIGKILL):
+            runtime.unlink(missing_ok=True)
+            return ControllerStatus("stopped")
+        if _wait_stopped(proc, min(timeout, 5.0), interval=0.1):
+            runtime.unlink(missing_ok=True)
+            return ControllerStatus("stopped")
     raise HarnessError("Jenkins did not stop after SIGKILL")
 
 
 def down(paths: ProjectPaths, *, timeout: float = 30.0, force: bool = False) -> ControllerStatus:
-    if timeout <= 0:
-        raise HarnessError("controller shutdown timeout must be greater than zero")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise HarnessError("controller shutdown timeout must be a finite number greater than zero")
     _ensure_private_directory(paths.state)
     _ensure_private_directory(paths.runtime)
     with exclusive_lock(paths.runtime / "lifecycle.lock"):

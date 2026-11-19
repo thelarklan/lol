@@ -167,6 +167,8 @@ def test_job_reconciliation_preserves_parameter_types_and_escapes_xml() -> None:
                     ]
                 }
             )
+        if url.endswith("/job/fixture/api/json"):
+            return Response(payload={"description": "Managed by LOL (ci/Jenkinsfile&more)"})
         return Response()
 
     session = Session(respond)
@@ -410,3 +412,43 @@ def test_job_reconciliation_preserves_learned_parameters_for_matching_script() -
     xml = str(session.posts[-1][1])
     assert "<hudson.model.BooleanParameterDefinition>" in xml
     assert "<name>FLAG</name>" in xml
+
+
+@pytest.mark.parametrize("description", [None, "Managed by LOL"])
+def test_job_reconciliation_ignores_unverified_legacy_description(
+    description: str | None,
+) -> None:
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if "parameterDefinitions" in url:
+            raise AssertionError("unverified legacy parameterDefinitions must not be inherited")
+        if url.endswith("/job/fixture/api/json"):
+            payload = {"description": description} if description is not None else {}
+            return Response(payload=payload)
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["CURRENT"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<name>CURRENT</name>" in xml
+
+
+@pytest.mark.parametrize("bad_timeout", [float("nan"), float("inf"), float("-inf")])
+def test_client_and_queue_reject_non_finite_timeouts(bad_timeout: float) -> None:
+    with pytest.raises(HarnessError, match="finite number greater than zero"):
+        JenkinsClient("http://127.0.0.1:8080", "lol", "password", timeout=bad_timeout)
+
+    client = client_with(Session(lambda url: Response()))
+    with pytest.raises(HarnessError, match="finite number greater than zero"):
+        client.wait_for_build("http://127.0.0.1:8080/queue/item/1/", timeout=bad_timeout)

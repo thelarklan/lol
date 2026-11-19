@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
 import subprocess
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,7 +26,12 @@ from lol.controller import (
 from lol.errors import HarnessError
 from lol.io import write_json
 from lol.paths import AppPaths, ProjectPaths
-from lol.process import exclusive_lock, process_matches, process_start_time
+from lol.process import (
+    exclusive_lock,
+    open_verified_process,
+    process_matches,
+    process_start_time,
+)
 
 
 def project_paths(tmp_path: Path) -> ProjectPaths:
@@ -372,24 +380,53 @@ def test_up_refuses_configuration_drift_for_running_process(
         up(config, paths)
 
 
+class FakeVerifiedProcess:
+    def __init__(self, pid: int, running_states: list[bool]) -> None:
+        self.pid = pid
+        self.signals: list[int] = []
+        self._running_states = iter(running_states)
+
+    def send_signal(self, sig: int) -> bool:
+        self.signals.append(sig)
+        return True
+
+    def is_running(self) -> bool:
+        return next(self._running_states, False)
+
+
+def _write_controller_runtime(paths: ProjectPaths, pid: int, start_time: str) -> None:
+    write_json(
+        paths.runtime / "controller.json",
+        {
+            "pid": pid,
+            "process_start_time": start_time,
+            "endpoint": "http://127.0.0.1:1234",
+        },
+        mode=0o600,
+    )
+
+
 def test_down_signals_only_matching_process_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths = project_paths(tmp_path)
-    states = iter(
-        [
-            ControllerStatus("running", "http://127.0.0.1:1234", 42),
-            ControllerStatus("stopped"),
-        ]
-    )
-    monkeypatch.setattr("lol.controller.status", lambda value: next(states))
-    signals: list[tuple[int, int]] = []
-    monkeypatch.setattr("lol.controller.os.kill", lambda pid, sig: signals.append((pid, sig)))
+    _write_controller_runtime(paths, 42, "start-42")
+    fake = FakeVerifiedProcess(42, [False])
+    opened: list[tuple[int, str]] = []
+
+    @contextmanager
+    def fake_open(pid: int, start_time: str) -> Any:
+        opened.append((pid, start_time))
+        yield fake
+
+    monkeypatch.setattr("lol.controller.open_verified_process", fake_open)
 
     result = down(paths)
 
     assert result.state == "stopped"
-    assert signals == [(42, 15)]
+    assert opened == [(42, "start-42")]
+    assert fake.signals == [int(signal.SIGTERM)]
+    assert not (paths.runtime / "controller.json").exists()
 
 
 def test_open_requires_running_controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -439,42 +476,108 @@ def test_down_raises_without_force_when_timeout_expires(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths = project_paths(tmp_path)
-    monkeypatch.setattr(
-        "lol.controller.status",
-        lambda value: ControllerStatus("running", "http://127.0.0.1:1234", 42),
-    )
-    signals: list[tuple[int, int]] = []
-    monkeypatch.setattr("lol.controller.os.kill", lambda pid, sig: signals.append((pid, sig)))
-    ticks = iter([0.0, 0.1, 0.2])
+    _write_controller_runtime(paths, 42, "start-42")
+    fake = FakeVerifiedProcess(42, [True, True, True])
+
+    @contextmanager
+    def fake_open(pid: int, start_time: str) -> Any:
+        yield fake
+
+    monkeypatch.setattr("lol.controller.open_verified_process", fake_open)
+    ticks = iter([0.0, 0.05, 0.15])
     monkeypatch.setattr("lol.controller.time.monotonic", lambda: next(ticks))
     monkeypatch.setattr("lol.controller.time.sleep", lambda _: None)
 
     with pytest.raises(HarnessError, match="did not stop before the timeout"):
         down(paths, timeout=0.1)
 
-    assert signals == [(42, 15)]
+    assert fake.signals == [int(signal.SIGTERM)]
+    assert (paths.runtime / "controller.json").exists()
 
 
-def test_down_force_sends_sigkill_after_timeout(
+def test_down_force_sends_sigkill_after_timeout_and_checks_after_final_sleep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths = project_paths(tmp_path)
-    states = iter(
-        [
-            ControllerStatus("running", "http://127.0.0.1:1234", 42),
-            ControllerStatus("running", "http://127.0.0.1:1234", 42),
-            ControllerStatus("running", "http://127.0.0.1:1234", 42),
-            ControllerStatus("stopped"),
-        ]
-    )
-    monkeypatch.setattr("lol.controller.status", lambda value: next(states))
-    signals: list[tuple[int, int]] = []
-    monkeypatch.setattr("lol.controller.os.kill", lambda pid, sig: signals.append((pid, sig)))
-    ticks = iter([0.0, 0.05, 0.2, 0.2, 0.25])
+    _write_controller_runtime(paths, 42, "start-42")
+    # Running during SIGTERM wait, still running immediately after SIGKILL,
+    # then exited by the check following the sleep that reaches kill_deadline.
+    fake = FakeVerifiedProcess(42, [True, True, True, False])
+
+    @contextmanager
+    def fake_open(pid: int, start_time: str) -> Any:
+        yield fake
+
+    monkeypatch.setattr("lol.controller.open_verified_process", fake_open)
+    ticks = iter([0.0, 0.05, 0.2, 0.2, 0.25, 0.35])
     monkeypatch.setattr("lol.controller.time.monotonic", lambda: next(ticks))
     monkeypatch.setattr("lol.controller.time.sleep", lambda _: None)
 
     result = down(paths, timeout=0.1, force=True)
 
     assert result.state == "stopped"
-    assert signals == [(42, 15), (42, 9)]
+    assert fake.signals == [int(signal.SIGTERM), int(signal.SIGKILL)]
+    assert not (paths.runtime / "controller.json").exists()
+
+
+def test_open_verified_process_binds_pidfd_and_rejects_mismatched_start_time() -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        start = process_start_time(proc.pid)
+        assert start is not None
+        with open_verified_process(proc.pid, "0") as mismatched:
+            assert mismatched is None
+        assert proc.poll() is None
+
+        with open_verified_process(proc.pid, start) as verified:
+            assert verified is not None
+            assert verified.send_signal(signal.SIGTERM) is True
+            proc.wait(timeout=5)
+            assert verified.is_running() is False
+            assert verified.send_signal(signal.SIGKILL) is False
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_down_force_terminates_real_sigterm_ignoring_process(tmp_path: Path) -> None:
+    paths = project_paths(tmp_path)
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "ready"
+        start = process_start_time(proc.pid)
+        assert start is not None
+        _write_controller_runtime(paths, proc.pid, start)
+
+        result = down(paths, timeout=0.1, force=True)
+
+        assert result.state == "stopped"
+        assert proc.wait(timeout=5) == -int(signal.SIGKILL)
+        assert not (paths.runtime / "controller.json").exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize("bad_timeout", [float("nan"), float("inf"), float("-inf")])
+def test_up_and_down_reject_non_finite_timeouts(
+    repository: Path, tmp_path: Path, bad_timeout: float
+) -> None:
+    config = load_effective(repository)
+    paths = project_paths(tmp_path)
+    with pytest.raises(HarnessError, match="finite number greater than zero"):
+        up(config, paths, timeout=bad_timeout)
+    with pytest.raises(HarnessError, match="finite number greater than zero"):
+        down(paths, timeout=bad_timeout, force=True)
