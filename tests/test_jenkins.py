@@ -573,13 +573,49 @@ def test_job_reconciliation_ignores_stale_description_when_script_path_differs()
     assert "<name>CURRENT</name>" in xml
 
 
+def test_job_reconciliation_ignores_edited_script_path_with_other_lol_description() -> None:
+    edited_config = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL (Jenkinsfile)</description>"
+        "<definition><scriptPath>ci/Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    )
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=edited_config)
+        if "parameterDefinitions" in url:
+            raise AssertionError("stale parameterDefinitions must not be inherited")
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["CURRENT"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<scriptPath>ci/Jenkinsfile</scriptPath>" in xml
+    assert "<name>CURRENT</name>" in xml
+
+
 @pytest.mark.parametrize(
     "config_xml",
     [
         "",
         "<not-valid-xml",
         "<project><definition><scriptPath>ci/Jenkinsfile</scriptPath></definition></project>",
-        "<flow-definition><definition/></flow-definition>",
+        "<flow-definition><definition><scriptPath>ci/Jenkinsfile</scriptPath></definition></flow-definition>",
+        "<flow-definition><description>Managed by LOL</description><definition/></flow-definition>",
     ],
 )
 def test_job_reconciliation_ignores_unverified_config_xml(config_xml: str) -> None:

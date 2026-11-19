@@ -215,7 +215,7 @@ class JenkinsClient:
         learned: dict[str, dict[str, Any]] = {}
         if response.status_code != 404:
             self._check(response, "inspect Pipeline job")
-            if self._configured_script(response.text) == script:
+            if self._job_matches_script(response.text, script, expected_description):
                 learned = {
                     str(item.get("name")): item
                     for item in self.parameter_definitions(name)
@@ -286,15 +286,21 @@ class JenkinsClient:
             )
 
     @staticmethod
-    def _configured_script(config_xml: str) -> str | None:
+    def _job_matches_script(
+        config_xml: str,
+        script: str,
+        expected_description: str,
+    ) -> bool:
         try:
             root = ET.fromstring(config_xml)
         except ET.ParseError:
-            return None
+            return False
         if root.tag != "flow-definition":
-            return None
-        script_path = root.findtext("definition/scriptPath")
-        return script_path if script_path else None
+            return False
+        description = root.findtext("description")
+        if description not in {expected_description, "Managed by LOL"}:
+            return False
+        return root.findtext("definition/scriptPath") == script
 
     @staticmethod
     def _parameter_xml(definition: dict[str, Any]) -> str:
