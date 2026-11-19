@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -12,6 +13,7 @@ import stat
 import subprocess
 import time
 import webbrowser
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,17 +23,21 @@ import requests
 
 from lol.cache import store_verified, verify_file
 from lol.config import EffectiveConfig
-from lol.errors import HarnessError
+from lol.errors import HarnessError, InteractionError
 from lol.io import write_json, write_yaml
 from lol.lockfile import ensure_lock_cache, load_lock
 from lol.paths import AppPaths, ProjectPaths
 from lol.process import (
+    LockBusyError,
     VerifiedProcess,
+    boot_id,
     exclusive_lock,
     open_verified_process,
+    pidfd_supported,
     process_matches,
     process_start_time,
 )
+from lol.runs import ACTIVE_RUN_STATUSES, list_runs
 
 TEMPLATE_VERSION = 1
 
@@ -142,11 +148,20 @@ def status(paths: ProjectPaths) -> ControllerStatus:
         pid = int(value["pid"])
         start_time = str(value["process_start_time"])
         endpoint = _loopback_endpoint(value.get("endpoint"))
+        recorded_boot_id = value.get("boot_id")
+        if recorded_boot_id is not None and (
+            not isinstance(recorded_boot_id, str) or not recorded_boot_id
+        ):
+            raise ValueError("invalid boot_id")
         if pid <= 0 or not start_time or endpoint is None:
             raise ValueError("invalid controller metadata")
-    except (OSError, ValueError, KeyError, TypeError):
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ELOOP, errno.EISDIR}:
+            return ControllerStatus("stopped", stale=True)
+        raise HarnessError(f"cannot read controller metadata {runtime}: {exc}") from exc
+    except (ValueError, KeyError, TypeError):
         return ControllerStatus("stopped", stale=True)
-    if not process_matches(pid, start_time):
+    if not process_matches(pid, start_time, expected_boot_id=recorded_boot_id):
         return ControllerStatus("stopped", endpoint, pid, True)
     return ControllerStatus("running", endpoint, pid)
 
@@ -298,6 +313,10 @@ def _terminate(process: subprocess.Popen[bytes], timeout: float = 5.0) -> None:
 def up(config: EffectiveConfig, paths: ProjectPaths, *, timeout: float = 120.0) -> ControllerStatus:
     if not math.isfinite(timeout) or timeout <= 0:
         raise HarnessError("controller startup timeout must be a finite number greater than zero")
+    if not pidfd_supported():
+        raise HarnessError(
+            "Linux kernel 5.3 or newer with pidfd support is required; run `lol doctor`"
+        )
     _ensure_private_directory(paths.state)
     _ensure_private_directory(paths.runtime)
     with exclusive_lock(paths.runtime / "lifecycle.lock"):
@@ -391,17 +410,17 @@ def up(config: EffectiveConfig, paths: ProjectPaths, *, timeout: float = 120.0) 
                 start_time = process_start_time(process.pid)
                 if not start_time:
                     raise HarnessError("could not identify the Jenkins process")
-                write_json(
-                    _runtime_file(paths),
-                    {
-                        "pid": process.pid,
-                        "process_start_time": start_time,
-                        "endpoint": endpoint,
-                        "configuration_digest": digest,
-                        "log": str(log_path),
-                    },
-                    mode=0o600,
-                )
+                runtime_metadata: dict[str, Any] = {
+                    "pid": process.pid,
+                    "process_start_time": start_time,
+                    "endpoint": endpoint,
+                    "configuration_digest": digest,
+                    "log": str(log_path),
+                }
+                current_boot_id = boot_id()
+                if current_boot_id is not None:
+                    runtime_metadata["boot_id"] = current_boot_id
+                write_json(_runtime_file(paths), runtime_metadata, mode=0o600)
                 _wait_ready(endpoint, process, timeout, log_path, log_start)
             except KeyboardInterrupt:
                 _terminate(process)
@@ -419,7 +438,7 @@ def up(config: EffectiveConfig, paths: ProjectPaths, *, timeout: float = 120.0) 
         raise HarnessError("could not allocate a Jenkins loopback port")
 
 
-def _read_running_identity(paths: ProjectPaths) -> tuple[int, str] | None:
+def _read_running_identity(paths: ProjectPaths) -> tuple[int, str, str | None] | None:
     runtime = _runtime_file(paths)
     if not runtime.exists() and not runtime.is_symlink():
         return None
@@ -428,11 +447,26 @@ def _read_running_identity(paths: ProjectPaths) -> tuple[int, str] | None:
         pid = int(value["pid"])
         start_time = str(value["process_start_time"])
         endpoint = _loopback_endpoint(value.get("endpoint"))
+        recorded_boot_id = value.get("boot_id")
+        if recorded_boot_id is not None and (
+            not isinstance(recorded_boot_id, str) or not recorded_boot_id
+        ):
+            raise ValueError("invalid boot_id")
         if pid <= 0 or not start_time or endpoint is None:
             raise ValueError("invalid controller metadata")
-    except (OSError, ValueError, KeyError, TypeError):
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ELOOP, errno.EISDIR}:
+            return None
+        raise HarnessError(f"cannot read controller metadata {runtime}: {exc}") from exc
+    except (ValueError, KeyError, TypeError):
         return None
-    return pid, start_time
+    return pid, start_time, recorded_boot_id
+
+
+def _has_active_runs(paths: ProjectPaths) -> bool:
+    if status(paths).state != "running":
+        return False
+    return any(record.metadata.get("status") in ACTIVE_RUN_STATUSES for record in list_runs(paths))
 
 
 def _wait_stopped(proc: VerifiedProcess, timeout: float, *, interval: float) -> bool:
@@ -452,8 +486,8 @@ def _down_locked(paths: ProjectPaths, *, timeout: float, force: bool = False) ->
     if identity is None:
         runtime.unlink(missing_ok=True)
         return ControllerStatus("stopped")
-    pid, start_time = identity
-    with open_verified_process(pid, start_time) as proc:
+    pid, start_time, recorded_boot_id = identity
+    with open_verified_process(pid, start_time, expected_boot_id=recorded_boot_id) as proc:
         if proc is None:
             runtime.unlink(missing_ok=True)
             return ControllerStatus("stopped")
@@ -474,12 +508,28 @@ def _down_locked(paths: ProjectPaths, *, timeout: float, force: bool = False) ->
     raise HarnessError("Jenkins did not stop after SIGKILL")
 
 
-def down(paths: ProjectPaths, *, timeout: float = 30.0, force: bool = False) -> ControllerStatus:
+def down(
+    paths: ProjectPaths,
+    *,
+    timeout: float = 30.0,
+    force: bool = False,
+    allow_active: bool = True,
+) -> ControllerStatus:
     if not math.isfinite(timeout) or timeout <= 0:
         raise HarnessError("controller shutdown timeout must be a finite number greater than zero")
     _ensure_private_directory(paths.state)
     _ensure_private_directory(paths.runtime)
-    with exclusive_lock(paths.runtime / "lifecycle.lock"):
+    with ExitStack() as stack:
+        if not allow_active:
+            try:
+                stack.enter_context(exclusive_lock(paths.runtime / "run.lock"))
+            except LockBusyError as exc:
+                raise InteractionError(
+                    "a pipeline is active; inspect it and use --yes to stop Jenkins"
+                ) from exc
+        stack.enter_context(exclusive_lock(paths.runtime / "lifecycle.lock"))
+        if not allow_active and _has_active_runs(paths):
+            raise InteractionError("a pipeline is active; inspect it and use --yes to stop Jenkins")
         return _down_locked(paths, timeout=timeout, force=force)
 
 

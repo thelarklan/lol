@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import hashlib
+import json
 import os
 import signal
 import subprocess
@@ -23,15 +25,18 @@ from lol.controller import (
     status,
     up,
 )
-from lol.errors import HarnessError
+from lol.errors import HarnessError, InteractionError
 from lol.io import write_json
 from lol.paths import AppPaths, ProjectPaths
 from lol.process import (
+    boot_id,
     exclusive_lock,
     open_verified_process,
+    pidfd_supported,
     process_matches,
     process_start_time,
 )
+from lol.runs import create_run
 
 
 def project_paths(tmp_path: Path) -> ProjectPaths:
@@ -287,6 +292,8 @@ def test_up_starts_loopback_controller_with_sanitized_environment(
     assert (paths.runtime / "credentials.json").stat().st_mode & 0o777 == 0o600
     assert (paths.runtime / "controller.json").stat().st_mode & 0o777 == 0o600
     assert (paths.controller / "jenkins.yaml").stat().st_mode & 0o777 == 0o600
+    recorded = json.loads((paths.runtime / "controller.json").read_text(encoding="utf-8"))
+    assert recorded["boot_id"] == boot_id()
 
 
 def test_up_retries_only_after_current_attempt_port_conflict(
@@ -394,29 +401,34 @@ class FakeVerifiedProcess:
         return next(self._running_states, False)
 
 
-def _write_controller_runtime(paths: ProjectPaths, pid: int, start_time: str) -> None:
-    write_json(
-        paths.runtime / "controller.json",
-        {
-            "pid": pid,
-            "process_start_time": start_time,
-            "endpoint": "http://127.0.0.1:1234",
-        },
-        mode=0o600,
-    )
+def _write_controller_runtime(
+    paths: ProjectPaths,
+    pid: int,
+    start_time: str,
+    *,
+    recorded_boot_id: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "pid": pid,
+        "process_start_time": start_time,
+        "endpoint": "http://127.0.0.1:1234",
+    }
+    if recorded_boot_id is not None:
+        payload["boot_id"] = recorded_boot_id
+    write_json(paths.runtime / "controller.json", payload, mode=0o600)
 
 
 def test_down_signals_only_matching_process_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths = project_paths(tmp_path)
-    _write_controller_runtime(paths, 42, "start-42")
+    _write_controller_runtime(paths, 42, "start-42", recorded_boot_id="boot-1")
     fake = FakeVerifiedProcess(42, [False])
-    opened: list[tuple[int, str]] = []
+    opened: list[tuple[int, str, str | None]] = []
 
     @contextmanager
-    def fake_open(pid: int, start_time: str) -> Any:
-        opened.append((pid, start_time))
+    def fake_open(pid: int, start_time: str, *, expected_boot_id: str | None = None) -> Any:
+        opened.append((pid, start_time, expected_boot_id))
         yield fake
 
     monkeypatch.setattr("lol.controller.open_verified_process", fake_open)
@@ -424,7 +436,7 @@ def test_down_signals_only_matching_process_identity(
     result = down(paths)
 
     assert result.state == "stopped"
-    assert opened == [(42, "start-42")]
+    assert opened == [(42, "start-42", "boot-1")]
     assert fake.signals == [int(signal.SIGTERM)]
     assert not (paths.runtime / "controller.json").exists()
 
@@ -480,7 +492,7 @@ def test_down_raises_without_force_when_timeout_expires(
     fake = FakeVerifiedProcess(42, [True, True, True])
 
     @contextmanager
-    def fake_open(pid: int, start_time: str) -> Any:
+    def fake_open(pid: int, start_time: str, *, expected_boot_id: str | None = None) -> Any:
         yield fake
 
     monkeypatch.setattr("lol.controller.open_verified_process", fake_open)
@@ -505,7 +517,7 @@ def test_down_force_sends_sigkill_after_timeout_and_checks_after_final_sleep(
     fake = FakeVerifiedProcess(42, [True, True, True, False])
 
     @contextmanager
-    def fake_open(pid: int, start_time: str) -> Any:
+    def fake_open(pid: int, start_time: str, *, expected_boot_id: str | None = None) -> Any:
         yield fake
 
     monkeypatch.setattr("lol.controller.open_verified_process", fake_open)
@@ -581,3 +593,151 @@ def test_up_and_down_reject_non_finite_timeouts(
         up(config, paths, timeout=bad_timeout)
     with pytest.raises(HarnessError, match="finite number greater than zero"):
         down(paths, timeout=bad_timeout, force=True)
+
+
+def test_down_preserves_metadata_when_process_inspection_hits_emfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = project_paths(tmp_path)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        start = process_start_time(proc.pid)
+        assert start is not None
+        _write_controller_runtime(paths, proc.pid, start, recorded_boot_id=boot_id())
+        original_read_text = Path.read_text
+
+        def emfile_on_proc_stat(self: Path, *args: Any, **kwargs: Any) -> str:
+            if str(self) == f"/proc/{proc.pid}/stat":
+                raise OSError(errno.EMFILE, "Too many open files")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", emfile_on_proc_stat)
+
+        with pytest.raises(HarnessError, match="cannot inspect process"):
+            down(paths, timeout=0.5, force=True)
+
+        assert proc.poll() is None
+        assert (paths.runtime / "controller.json").exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_down_preserves_metadata_when_controller_metadata_read_hits_emfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = project_paths(tmp_path)
+    _write_controller_runtime(paths, os.getpid(), "start-1")
+
+    def emfile_read(path: Path) -> dict[str, Any]:
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr("lol.controller._read_private_json", emfile_read)
+
+    with pytest.raises(HarnessError, match="cannot read controller metadata"):
+        down(paths)
+
+    assert (paths.runtime / "controller.json").exists()
+
+
+def test_verified_process_is_running_uses_pidfd_without_proc_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        start = process_start_time(proc.pid)
+        assert start is not None
+        with open_verified_process(proc.pid, start, expected_boot_id=boot_id()) as verified:
+            assert verified is not None
+            monkeypatch.setattr(
+                "lol.process.process_start_time",
+                lambda pid: pytest.fail("must not read /proc after verification"),
+            )
+            assert verified.is_running() is True
+            assert verified.send_signal(signal.SIGKILL) is True
+            # Poll detects exit even before proc.wait() reaps the zombie.
+            for _ in range(50):
+                if not verified.is_running():
+                    break
+                import time as _time
+
+                _time.sleep(0.02)
+            assert verified.is_running() is False
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_mismatched_boot_id_marks_status_stale_and_blocks_signaling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = project_paths(tmp_path)
+    start = process_start_time(os.getpid())
+    assert start is not None
+    _write_controller_runtime(paths, os.getpid(), start, recorded_boot_id="previous-boot")
+    monkeypatch.setattr("lol.process.boot_id", lambda: "current-boot")
+    monkeypatch.setattr(
+        "lol.process.os.pidfd_open",
+        lambda *args, **kwargs: pytest.fail("must not open pidfd after boot ID mismatch"),
+    )
+
+    current = status(paths)
+    assert current.state == "stopped"
+    assert current.stale is True
+
+    result = down(paths)
+    assert result.state == "stopped"
+    assert not (paths.runtime / "controller.json").exists()
+
+
+def test_pidfd_supported_handles_enosys_and_blocks_up(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unsupported_pidfd_open(pid: int, flags: int = 0) -> int:
+        raise OSError(errno.ENOSYS, "Function not implemented")
+
+    monkeypatch.setattr("lol.process.os.pidfd_open", unsupported_pidfd_open)
+    assert pidfd_supported() is False
+
+    config = load_effective(repository)
+    monkeypatch.setattr(
+        "lol.controller.subprocess.Popen",
+        lambda *args, **kwargs: pytest.fail("must not spawn Jenkins without pidfd support"),
+    )
+    paths = project_paths(tmp_path)
+    with pytest.raises(HarnessError, match="pidfd support"):
+        up(config, paths)
+
+
+def test_down_refuses_active_run_race_under_locks_unless_allowed(tmp_path: Path) -> None:
+    paths = project_paths(tmp_path)
+    start = process_start_time(os.getpid())
+    assert start is not None
+    _write_controller_runtime(paths, os.getpid(), start, recorded_boot_id=boot_id())
+
+    with exclusive_lock(paths.runtime / "run.lock"):
+        with pytest.raises(InteractionError, match="pipeline is active"):
+            down(paths, allow_active=False, force=True)
+        assert (paths.runtime / "controller.json").exists()
+
+    create_run(paths, {"status": "provisioning"})
+    with pytest.raises(InteractionError, match="pipeline is active"):
+        down(paths, allow_active=False, force=True)
+    assert (paths.runtime / "controller.json").exists()
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        proc_start = process_start_time(proc.pid)
+        assert proc_start is not None
+        _write_controller_runtime(paths, proc.pid, proc_start, recorded_boot_id=boot_id())
+        with exclusive_lock(paths.runtime / "run.lock"):
+            result = down(paths, timeout=2.0, allow_active=True)
+        assert result.state == "stopped"
+        assert proc.wait(timeout=5) == -int(signal.SIGTERM)
+        assert not (paths.runtime / "controller.json").exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)

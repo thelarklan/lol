@@ -485,3 +485,23 @@ def test_config_edit_preserves_default_jenkinsfile_with_trailing_space(
     updated = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     assert updated["pipeline"]["file"] == "Jenkinsfile "
     assert updated["node"]["executors"] == 2
+
+
+def test_config_edit_preserves_existing_whitespace_only_jenkinsfile_default(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (repository / "   ").write_text("pipeline { agent any }\n", encoding="utf-8")
+    manifest_path = repository / "lol.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["pipeline"]["file"] = "   "
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr("lol.cli.create_lock", _fake_create_lock)
+    monkeypatch.setattr("lol.cli._is_interactive", lambda: True)
+
+    result = CliRunner().invoke(cli, ["config", "edit"], input="\n\n\n\n\ny\n")
+
+    assert result.exit_code == 0, result.output
+    updated = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    assert updated["pipeline"]["file"] == "   "

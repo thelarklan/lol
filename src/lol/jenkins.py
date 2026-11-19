@@ -4,6 +4,7 @@ import math
 import re
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 import xml.sax.saxutils as xml_escape
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -216,7 +217,12 @@ class JenkinsClient:
             self._check(response, "inspect Pipeline job")
             job_info = self._json_object(response, "inspect Pipeline job")
             description = job_info.get("description")
-            same_script = description == expected_description
+            if description == expected_description:
+                same_script = True
+            elif description == "Managed by LOL":
+                same_script = self._configured_script(encoded) == script
+            else:
+                same_script = False
             if same_script:
                 learned = {
                     str(item.get("name")): item
@@ -286,6 +292,18 @@ class JenkinsClient:
                 data=xml,
                 content_type="application/xml; charset=utf-8",
             )
+
+    def _configured_script(self, encoded_name: str) -> str | None:
+        response = self.get_response(
+            self._url(f"job/{encoded_name}/config.xml"),
+            action="read Pipeline job configuration",
+        )
+        try:
+            root = ET.fromstring(response.text)
+        except ET.ParseError:
+            return None
+        script_path = root.findtext("definition/scriptPath")
+        return script_path if script_path else None
 
     @staticmethod
     def _parameter_xml(definition: dict[str, Any]) -> str:

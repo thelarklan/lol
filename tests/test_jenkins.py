@@ -414,9 +414,117 @@ def test_job_reconciliation_preserves_learned_parameters_for_matching_script() -
     assert "<name>FLAG</name>" in xml
 
 
-@pytest.mark.parametrize("description", [None, "Managed by LOL"])
+def test_job_reconciliation_preserves_legacy_job_parameters_for_same_script() -> None:
+    legacy_config = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL</description>"
+        "<definition><scriptPath>Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    )
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/api/json"):
+            return Response(payload={"description": "Managed by LOL"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=legacy_config)
+        if "parameterDefinitions" in url:
+            return Response(
+                payload={
+                    "property": [
+                        {
+                            "parameterDefinitions": [
+                                {
+                                    "name": "OMITTED_BOOL",
+                                    "_class": "hudson.model.BooleanParameterDefinition",
+                                    "defaultParameterValue": {"value": True},
+                                },
+                                {
+                                    "name": "SUPPLIED_BOOL",
+                                    "_class": "hudson.model.BooleanParameterDefinition",
+                                    "defaultParameterValue": {"value": False},
+                                },
+                            ]
+                        }
+                    ]
+                }
+            )
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "Jenkinsfile",
+        parameters=["SUPPLIED_BOOL"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (Jenkinsfile)</description>" in xml
+    assert (
+        "<hudson.model.BooleanParameterDefinition>"
+        "<name>OMITTED_BOOL</name><defaultValue>true</defaultValue>"
+        "</hudson.model.BooleanParameterDefinition>"
+    ) in xml
+    assert (
+        "<hudson.model.BooleanParameterDefinition>"
+        "<name>SUPPLIED_BOOL</name><defaultValue>false</defaultValue>"
+        "</hudson.model.BooleanParameterDefinition>"
+    ) in xml
+
+
+def test_job_reconciliation_discards_legacy_job_parameters_when_script_changes() -> None:
+    legacy_config = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL</description>"
+        "<definition><scriptPath>Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    )
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/api/json"):
+            return Response(payload={"description": "Managed by LOL"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=legacy_config)
+        if "parameterDefinitions" in url:
+            raise AssertionError("stale legacy parameterDefinitions must not be inherited")
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["CURRENT"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<name>CURRENT</name>" in xml
+
+
+@pytest.mark.parametrize(
+    ("description", "config_xml"),
+    [
+        (None, ""),
+        ("Managed by LOL", "<not-valid-xml"),
+        ("Managed by LOL", "<flow-definition><definition/></flow-definition>"),
+    ],
+)
 def test_job_reconciliation_ignores_unverified_legacy_description(
     description: str | None,
+    config_xml: str,
 ) -> None:
     def respond(url: str) -> Response:
         if "crumbIssuer" in url:
@@ -426,6 +534,8 @@ def test_job_reconciliation_ignores_unverified_legacy_description(
         if url.endswith("/job/fixture/api/json"):
             payload = {"description": description} if description is not None else {}
             return Response(payload=payload)
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=config_xml)
         return Response()
 
     session = Session(respond)

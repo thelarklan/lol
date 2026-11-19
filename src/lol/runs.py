@@ -15,6 +15,7 @@ from lol.io import write_json
 from lol.paths import ProjectPaths
 
 RUN_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
+ACTIVE_RUN_STATUSES = frozenset({"provisioning", "queued", "running", "stopping"})
 
 
 def new_run_id() -> str:

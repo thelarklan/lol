@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from lol.config import load_effective
-from lol.doctor import Finding, _java, _podman, _writable, analyze, final_state
+from lol.doctor import Finding, _java, _pidfd, _podman, _writable, analyze, final_state
 
 
 def _pass(check: str) -> Finding:
@@ -15,6 +15,7 @@ def _pass(check: str) -> Finding:
 
 
 def _isolate_host_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("lol.doctor._pidfd", lambda: _pass("host.pidfd"))
     monkeypatch.setattr("lol.doctor._command", lambda name: _pass(f"command.{name}"))
     monkeypatch.setattr("lol.doctor._java", lambda: _pass("java.runtime"))
     monkeypatch.setattr("lol.doctor._writable", lambda path: _pass("state.writable"))
@@ -267,3 +268,20 @@ def test_doctor_rejects_pipeline_symlink_outside_repository(
     finding = next(item for item in findings if item.check == "pipeline.file")
     assert finding.status == "blocker"
     assert "outside the repository" in finding.summary
+
+
+def test_doctor_reports_missing_pidfd_support_as_unsupported(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_host_checks(monkeypatch)
+    monkeypatch.setattr("lol.doctor._pidfd", _pidfd)
+    monkeypatch.setattr("lol.doctor.pidfd_supported", lambda: False)
+    monkeypatch.setattr("lol.doctor.load_lock", lambda config: {"version": 1})
+    monkeypatch.setattr("lol.doctor.verify_lock_cache", lambda lock: [])
+
+    findings = analyze(load_effective(repository), repository / ".state")
+
+    finding = next(item for item in findings if item.check == "host.pidfd")
+    assert finding.status == "unsupported"
+    assert "kernel 5.3" in finding.recommendation
+    assert final_state(findings) == "Unsupported"

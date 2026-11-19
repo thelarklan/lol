@@ -55,7 +55,8 @@ required.
 - `lol down [--timeout SECONDS] [--yes] [--force]` stops Jenkins while preserving generated
   state and run history. Active runs require confirmation or `--yes`. If Jenkins does not exit
   before the timeout, `--force` sends `SIGKILL` to the controller process. Forced shutdown does
-  not terminate active build subprocesses, so run `lol stop` first when a build is running.
+  not terminate active build subprocesses. When a build is active, run `lol stop` and wait for
+  cancellation to finish before forcing shutdown.
 - `lol reset [--yes]` previews and removes generated controller/runtime state, preserves run history,
   and recreates the controller. Noninteractive use requires `--yes`.
 

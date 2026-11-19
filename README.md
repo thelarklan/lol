@@ -100,7 +100,7 @@ check performs no network access and fails if the lock is missing or stale.
 
 ### Prerequisites
 
-- Linux
+- Linux (kernel 5.3 or newer with `pidfd` support)
 - Git
 - Java 21 or Java 25
 - Rootless Podman when the repository's workloads require it

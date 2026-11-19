@@ -47,10 +47,16 @@ def test_status_and_down_use_repository_scoped_state(
     monkeypatch.setattr(
         "lol.cli.controller_status", lambda paths: ControllerStatus("stopped", stale=True)
     )
-    timeouts: list[float] = []
+    calls: list[tuple[float, bool, bool]] = []
 
-    def stop(paths: object, *, timeout: float) -> ControllerStatus:
-        timeouts.append(timeout)
+    def stop(
+        paths: object,
+        *,
+        timeout: float,
+        force: bool = False,
+        allow_active: bool = True,
+    ) -> ControllerStatus:
+        calls.append((timeout, force, allow_active))
         return ControllerStatus("stopped")
 
     monkeypatch.setattr("lol.cli.controller_down", stop)
@@ -62,7 +68,7 @@ def test_status_and_down_use_repository_scoped_state(
     assert json.loads(status_result.output)["stale"] is True
     assert down_result.exit_code == 0, down_result.output
     assert json.loads(down_result.output)["state"] == "stopped"
-    assert timeouts == [4.0]
+    assert calls == [(4.0, False, False)]
 
 
 def test_open_reports_the_loopback_endpoint(
@@ -121,19 +127,29 @@ def test_down_force_passes_force_flag(
     repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _prepare(repository, monkeypatch, tmp_path)
-    calls: list[tuple[float, bool]] = []
+    calls: list[tuple[float, bool, bool]] = []
 
-    def stop(paths: object, *, timeout: float, force: bool = False) -> ControllerStatus:
-        calls.append((timeout, force))
+    def stop(
+        paths: object,
+        *,
+        timeout: float,
+        force: bool = False,
+        allow_active: bool = True,
+    ) -> ControllerStatus:
+        calls.append((timeout, force, allow_active))
         return ControllerStatus("stopped")
 
     monkeypatch.setattr("lol.cli.controller_down", stop)
 
     result = CliRunner().invoke(cli, ["--format", "json", "down", "--timeout", "2", "--force"])
+    yes_result = CliRunner().invoke(
+        cli, ["--format", "json", "down", "--timeout", "2", "--force", "--yes"]
+    )
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["state"] == "stopped"
-    assert calls == [(2.0, True)]
+    assert yes_result.exit_code == 0, yes_result.output
+    assert calls == [(2.0, True, False), (2.0, True, True)]
 
 
 @pytest.mark.parametrize(

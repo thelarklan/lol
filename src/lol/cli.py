@@ -55,7 +55,7 @@ from lol.runner import (
     load_parameter_definitions,
     read_console,
 )
-from lol.runs import RunRecord, list_runs, load_run
+from lol.runs import ACTIVE_RUN_STATUSES, RunRecord, list_runs, load_run
 from lol.trust import is_trusted, trust
 
 
@@ -431,13 +431,13 @@ def config_edit(yes: bool) -> None:
         entered_jenkinsfile = str(click.prompt("Jenkinsfile", default=jenkinsfile))
         if entered_jenkinsfile != jenkinsfile:
             jenkinsfile = entered_jenkinsfile.strip()
-        if not jenkinsfile.strip():
-            raise ConfigError("Jenkinsfile must not be empty")
+            if not jenkinsfile:
+                raise ConfigError("Jenkinsfile must not be empty")
         entered_version = str(click.prompt("Jenkins version", default=jenkins_version))
         if entered_version != jenkins_version:
             jenkins_version = entered_version.strip()
-        if not jenkins_version.strip():
-            raise ConfigError("Jenkins version must not be empty")
+            if not jenkins_version:
+                raise ConfigError("Jenkins version must not be empty")
         label_text = click.prompt("Node labels (comma-separated)", default=",".join(labels))
         labels = tuple(item.strip() for item in label_text.split(",") if item.strip())
         require_podman = click.confirm("Require rootless Podman?", default=require_podman)
@@ -644,15 +644,18 @@ def down_command(context: Context, timeout: float, yes: bool, force: bool) -> No
     """Stop Jenkins while preserving the repository's generated state."""
     _, identity, paths = _resolved_project()
     active = _active_runs(paths)
+    confirmed_active = yes
     if active and not yes:
         if context.output_format == "json" or not _is_interactive():
             raise InteractionError("a pipeline is active; inspect it and use --yes to stop Jenkins")
         if not click.confirm("A pipeline is active. Stop Jenkins?", default=False):
             raise InteractionError("shutdown cancelled")
-    state = (
-        controller_down(paths, timeout=timeout, force=True)
-        if force
-        else controller_down(paths, timeout=timeout)
+        confirmed_active = True
+    state = controller_down(
+        paths,
+        timeout=timeout,
+        force=force,
+        allow_active=confirmed_active,
     )
     context.emit(_controller_payload(identity, state))
 
@@ -663,7 +666,7 @@ def _active_runs(paths: ProjectPaths) -> list[RunRecord]:
     return [
         record
         for record in list_runs(paths)
-        if record.metadata.get("status") in {"provisioning", "queued", "running", "stopping"}
+        if record.metadata.get("status") in ACTIVE_RUN_STATUSES
     ]
 
 
