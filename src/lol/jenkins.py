@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 import re
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 import xml.sax.saxutils as xml_escape
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -36,8 +38,8 @@ class JenkinsClient:
         password: str,
         timeout: float = 20.0,
     ) -> None:
-        if timeout <= 0:
-            raise HarnessError("Jenkins request timeout must be greater than zero")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise HarnessError("Jenkins request timeout must be a finite number greater than zero")
         self.endpoint = self._validated_endpoint(endpoint)
         self.timeout = timeout
         self.session = requests.Session()
@@ -202,21 +204,23 @@ class JenkinsClient:
         encoded = urllib.parse.quote(name, safe="")
         try:
             response = self.session.get(
-                self._url(f"job/{encoded}/api/json"),
+                self._url(f"job/{encoded}/config.xml"),
                 timeout=self.timeout,
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise HarnessError("could not inspect Pipeline job: Jenkins is unavailable") from exc
 
+        expected_description = f"Managed by LOL ({script})"
         learned: dict[str, dict[str, Any]] = {}
         if response.status_code != 404:
             self._check(response, "inspect Pipeline job")
-            learned = {
-                str(item.get("name")): item
-                for item in self.parameter_definitions(name)
-                if item.get("name") and not str(item.get("name")).startswith("LOL_")
-            }
+            if self._job_matches_script(response.content, script, expected_description):
+                learned = {
+                    str(item.get("name")): item
+                    for item in self.parameter_definitions(name)
+                    if item.get("name") and not str(item.get("name")).startswith("LOL_")
+                }
         for parameter in parameters or ():
             learned.setdefault(parameter, {"name": parameter})
         for parameter in secret_parameters or ():
@@ -241,7 +245,7 @@ class JenkinsClient:
         xml = f"""<?xml version='1.1' encoding='UTF-8'?>
 <flow-definition plugin="workflow-job">
   <actions/>
-  <description>Managed by LOL</description>
+  <description>{escape(expected_description)}</description>
   <keepDependencies>false</keepDependencies>
   <properties>
     <jenkins.model.BuildDiscarderProperty>
@@ -280,6 +284,23 @@ class JenkinsClient:
                 data=xml,
                 content_type="application/xml; charset=utf-8",
             )
+
+    @staticmethod
+    def _job_matches_script(
+        config_xml: bytes,
+        script: str,
+        expected_description: str,
+    ) -> bool:
+        try:
+            root = ET.fromstring(config_xml)
+        except ET.ParseError:
+            return False
+        if root.tag != "flow-definition":
+            return False
+        description = root.findtext("description")
+        if description not in {expected_description, "Managed by LOL"}:
+            return False
+        return root.findtext("definition/scriptPath") == script
 
     @staticmethod
     def _parameter_xml(definition: dict[str, Any]) -> str:
@@ -334,8 +355,8 @@ class JenkinsClient:
         return self._controller_url(location, "resolve Jenkins queue location")
 
     def wait_for_build(self, queue_url: str, timeout: float = 60.0) -> Build:
-        if timeout <= 0:
-            raise HarnessError("Jenkins queue timeout must be greater than zero")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise HarnessError("Jenkins queue timeout must be a finite number greater than zero")
         queue = self._controller_url(queue_url, "read Jenkins queue")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

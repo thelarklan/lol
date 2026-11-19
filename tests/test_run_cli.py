@@ -157,6 +157,7 @@ def test_run_noninteractive_reports_all_missing_learned_parameters(
                 "defaultParameterValue": {"value": "local"},
             },
         ],
+        script="Jenkinsfile",
     )
     monkeypatch.setattr("lol.cli.execute", lambda *args, **kwargs: pytest.fail("must not run"))
 
@@ -331,3 +332,78 @@ def test_down_refuses_to_stop_active_run_without_confirmation(
 
     assert result.exit_code != 0
     assert "a pipeline is active" in str(result.exception)
+
+
+def test_run_ignores_learned_parameters_from_another_jenkinsfile(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = _prepare(repository, monkeypatch, tmp_path)
+    paths.runtime.mkdir(parents=True)
+    save_parameter_definitions(
+        paths,
+        [{"name": "TARGET", "_class": "hudson.model.StringParameterDefinition"}],
+        script="Jenkinsfile",
+    )
+    FakeExecute.calls = []
+    FakeExecute.exit_code = EXIT_SUCCESS
+    monkeypatch.setattr("lol.cli.execute", FakeExecute.run)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "--jenkinsfile",
+            "ci/Jenkinsfile",
+            "--trust-repository",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert FakeExecute.calls[0]["jenkinsfile"] == "ci/Jenkinsfile"
+
+
+def test_run_ignores_legacy_learned_parameters_without_script(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = _prepare(repository, monkeypatch, tmp_path)
+    paths.runtime.mkdir(parents=True)
+    save_parameter_definitions(
+        paths,
+        [{"name": "LEGACY_REQUIRED", "_class": "hudson.model.StringParameterDefinition"}],
+    )
+    FakeExecute.calls = []
+    FakeExecute.exit_code = EXIT_SUCCESS
+    monkeypatch.setattr("lol.cli.execute", FakeExecute.run)
+
+    result = CliRunner().invoke(cli, ["run", "--trust-repository", "--non-interactive"])
+
+    assert result.exit_code == 0, result.output
+    assert len(FakeExecute.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--controller-timeout", "nan"),
+        ("--controller-timeout", "inf"),
+        ("--queue-timeout", "nan"),
+        ("--queue-timeout", "inf"),
+    ],
+)
+def test_run_rejects_non_finite_timeouts(
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    flag: str,
+    value: str,
+) -> None:
+    _prepare(repository, monkeypatch, tmp_path)
+    monkeypatch.setattr("lol.cli.execute", lambda *args, **kwargs: pytest.fail("must not run"))
+
+    result = CliRunner().invoke(
+        cli, ["run", "--trust-repository", "--non-interactive", flag, value]
+    )
+
+    assert result.exit_code != 0
+    assert "not a finite number" in result.output

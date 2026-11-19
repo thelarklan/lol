@@ -18,13 +18,14 @@ class Response:
         *,
         headers: dict[str, str] | None = None,
         text: str = "",
+        content: bytes | None = None,
         chunks: tuple[bytes, ...] = (),
     ) -> None:
         self.status_code = status_code
         self.payload = {} if payload is None else payload
         self.headers = headers or {}
         self.text = text
-        self.content = text.encode()
+        self.content = text.encode() if content is None else content
         self.chunks = chunks
         self.closed = False
 
@@ -166,6 +167,16 @@ def test_job_reconciliation_preserves_parameter_types_and_escapes_xml() -> None:
                         }
                     ]
                 }
+            )
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(
+                text=(
+                    "<?xml version='1.1' encoding='UTF-8'?>"
+                    "<flow-definition>"
+                    "<description>Managed by LOL (ci/Jenkinsfile&amp;more)</description>"
+                    "<definition><scriptPath>ci/Jenkinsfile&amp;more</scriptPath></definition>"
+                    "</flow-definition>"
+                )
             )
         return Response()
 
@@ -344,3 +355,356 @@ def test_credentials_are_escaped_and_delete_id_is_encoded() -> None:
     assert "<password>pass&lt;&amp;</password>" in xml
     assert "<description>lol:run&lt;&amp;</description>" in xml
     assert "/credential/id%2Fone/doDelete" in session.posts[1][0]
+
+
+def test_job_reconciliation_clears_learned_parameters_when_script_changes() -> None:
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if "parameterDefinitions" in url:
+            raise AssertionError("stale parameterDefinitions must not be inherited")
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(
+                text=(
+                    "<?xml version='1.1' encoding='UTF-8'?>"
+                    "<flow-definition>"
+                    "<description>Managed by LOL (Jenkinsfile)</description>"
+                    "<definition><scriptPath>Jenkinsfile</scriptPath></definition>"
+                    "</flow-definition>"
+                )
+            )
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["NEW_PARAM"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<name>NEW_PARAM</name>" in xml
+    assert "<name>OLD_PARAM</name>" not in xml
+
+
+def test_job_reconciliation_preserves_learned_parameters_for_matching_script() -> None:
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if "parameterDefinitions" in url:
+            return Response(
+                payload={
+                    "property": [
+                        {
+                            "parameterDefinitions": [
+                                {
+                                    "name": "FLAG",
+                                    "_class": "hudson.model.BooleanParameterDefinition",
+                                    "defaultParameterValue": {"value": True},
+                                }
+                            ]
+                        }
+                    ]
+                }
+            )
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(
+                text=(
+                    "<?xml version='1.1' encoding='UTF-8'?>"
+                    "<flow-definition>"
+                    "<description>Managed by LOL (ci/Jenkinsfile)</description>"
+                    "<definition><scriptPath>ci/Jenkinsfile</scriptPath></definition>"
+                    "</flow-definition>"
+                )
+            )
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<hudson.model.BooleanParameterDefinition>" in xml
+    assert "<name>FLAG</name>" in xml
+
+
+def test_job_reconciliation_preserves_legacy_job_parameters_for_same_script() -> None:
+    legacy_config = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL</description>"
+        "<definition><scriptPath>Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    )
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/api/json"):
+            return Response(payload={"description": "Managed by LOL"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=legacy_config)
+        if "parameterDefinitions" in url:
+            return Response(
+                payload={
+                    "property": [
+                        {
+                            "parameterDefinitions": [
+                                {
+                                    "name": "OMITTED_BOOL",
+                                    "_class": "hudson.model.BooleanParameterDefinition",
+                                    "defaultParameterValue": {"value": True},
+                                },
+                                {
+                                    "name": "SUPPLIED_BOOL",
+                                    "_class": "hudson.model.BooleanParameterDefinition",
+                                    "defaultParameterValue": {"value": False},
+                                },
+                            ]
+                        }
+                    ]
+                }
+            )
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "Jenkinsfile",
+        parameters=["SUPPLIED_BOOL"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (Jenkinsfile)</description>" in xml
+    assert (
+        "<hudson.model.BooleanParameterDefinition>"
+        "<name>OMITTED_BOOL</name><defaultValue>true</defaultValue>"
+        "</hudson.model.BooleanParameterDefinition>"
+    ) in xml
+    assert (
+        "<hudson.model.BooleanParameterDefinition>"
+        "<name>SUPPLIED_BOOL</name><defaultValue>false</defaultValue>"
+        "</hudson.model.BooleanParameterDefinition>"
+    ) in xml
+
+
+def test_job_reconciliation_preserves_legacy_non_ascii_script_from_utf8_xml_bytes() -> None:
+    legacy_bytes = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL</description>"
+        "<definition><scriptPath>Café/Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    ).encode()
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/config.xml"):
+            # Simulate Requests decoding charset-less UTF-8 XML with the wrong text codec.
+            return Response(
+                text=legacy_bytes.decode("mac_roman"),
+                content=legacy_bytes,
+            )
+        if "parameterDefinitions" in url:
+            return Response(
+                payload={
+                    "property": [
+                        {
+                            "parameterDefinitions": [
+                                {
+                                    "name": "FLAG",
+                                    "_class": "hudson.model.BooleanParameterDefinition",
+                                    "defaultParameterValue": {"value": True},
+                                }
+                            ]
+                        }
+                    ]
+                }
+            )
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "Café/Jenkinsfile",
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (Café/Jenkinsfile)</description>" in xml
+    assert (
+        "<hudson.model.BooleanParameterDefinition>"
+        "<name>FLAG</name><defaultValue>true</defaultValue>"
+        "</hudson.model.BooleanParameterDefinition>"
+    ) in xml
+
+
+def test_job_reconciliation_discards_legacy_job_parameters_when_script_changes() -> None:
+    legacy_config = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL</description>"
+        "<definition><scriptPath>Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    )
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/api/json"):
+            return Response(payload={"description": "Managed by LOL"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=legacy_config)
+        if "parameterDefinitions" in url:
+            raise AssertionError("stale legacy parameterDefinitions must not be inherited")
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["CURRENT"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<name>CURRENT</name>" in xml
+
+
+def test_job_reconciliation_ignores_stale_description_when_script_path_differs() -> None:
+    stale_config = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL (ci/Jenkinsfile)</description>"
+        "<definition><scriptPath>other/Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    )
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=stale_config)
+        if "parameterDefinitions" in url:
+            raise AssertionError("stale parameterDefinitions must not be inherited")
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["CURRENT"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<scriptPath>ci/Jenkinsfile</scriptPath>" in xml
+    assert "<name>CURRENT</name>" in xml
+
+
+def test_job_reconciliation_ignores_edited_script_path_with_other_lol_description() -> None:
+    edited_config = (
+        "<?xml version='1.1' encoding='UTF-8'?>"
+        "<flow-definition>"
+        "<description>Managed by LOL (Jenkinsfile)</description>"
+        "<definition><scriptPath>ci/Jenkinsfile</scriptPath></definition>"
+        "</flow-definition>"
+    )
+
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=edited_config)
+        if "parameterDefinitions" in url:
+            raise AssertionError("stale parameterDefinitions must not be inherited")
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["CURRENT"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<scriptPath>ci/Jenkinsfile</scriptPath>" in xml
+    assert "<name>CURRENT</name>" in xml
+
+
+@pytest.mark.parametrize(
+    "config_xml",
+    [
+        "",
+        "<not-valid-xml",
+        "<project><definition><scriptPath>ci/Jenkinsfile</scriptPath></definition></project>",
+        "<flow-definition><definition><scriptPath>ci/Jenkinsfile</scriptPath></definition></flow-definition>",
+        "<flow-definition><description>Managed by LOL</description><definition/></flow-definition>",
+    ],
+)
+def test_job_reconciliation_ignores_unverified_config_xml(config_xml: str) -> None:
+    def respond(url: str) -> Response:
+        if "crumbIssuer" in url:
+            return Response(payload={"crumbRequestField": "Crumb", "crumb": "value"})
+        if "parameterDefinitions" in url:
+            raise AssertionError("unverified parameterDefinitions must not be inherited")
+        if url.endswith("/job/fixture/config.xml"):
+            return Response(text=config_xml)
+        return Response()
+
+    session = Session(respond)
+    client = client_with(session)
+
+    client.ensure_pipeline_job(
+        "fixture",
+        "git://127.0.0.1/repository.git",
+        "lol-run",
+        "ci/Jenkinsfile",
+        parameters=["CURRENT"],
+    )
+
+    xml = str(session.posts[-1][1])
+    assert "<description>Managed by LOL (ci/Jenkinsfile)</description>" in xml
+    assert "<name>CURRENT</name>" in xml
+
+
+@pytest.mark.parametrize("bad_timeout", [float("nan"), float("inf"), float("-inf")])
+def test_client_and_queue_reject_non_finite_timeouts(bad_timeout: float) -> None:
+    with pytest.raises(HarnessError, match="finite number greater than zero"):
+        JenkinsClient("http://127.0.0.1:8080", "lol", "password", timeout=bad_timeout)
+
+    client = client_with(Session(lambda url: Response()))
+    with pytest.raises(HarnessError, match="finite number greater than zero"):
+        client.wait_for_build("http://127.0.0.1:8080/queue/item/1/", timeout=bad_timeout)

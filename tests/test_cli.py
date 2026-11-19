@@ -450,3 +450,58 @@ def test_config_edit_preserves_podman_command_and_honors_explicit_no(
         "commands": ["git", "podman"],
         "podman": False,
     }
+
+
+def test_config_edit_rejects_whitespace_jenkinsfile(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr("lol.cli._is_interactive", lambda: True)
+
+    result = CliRunner().invoke(cli, ["config", "edit"], input="   \n")
+
+    assert result.exit_code != 0
+    assert "Jenkinsfile must not be empty" in str(result.exception)
+
+
+def test_config_edit_preserves_default_jenkinsfile_with_trailing_space(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spaced = repository / "Jenkinsfile "
+    spaced.write_text("pipeline { agent any }\n", encoding="utf-8")
+    manifest_path = repository / "lol.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["pipeline"]["file"] = "Jenkinsfile "
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr("lol.cli.create_lock", _fake_create_lock)
+    monkeypatch.setattr("lol.cli._is_interactive", lambda: True)
+
+    result = CliRunner().invoke(cli, ["config", "edit"], input="\n\n\n\n2\ny\n")
+
+    assert result.exit_code == 0, result.output
+    updated = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    assert updated["pipeline"]["file"] == "Jenkinsfile "
+    assert updated["node"]["executors"] == 2
+
+
+def test_config_edit_preserves_existing_whitespace_only_jenkinsfile_default(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (repository / "   ").write_text("pipeline { agent any }\n", encoding="utf-8")
+    manifest_path = repository / "lol.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["pipeline"]["file"] = "   "
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr("lol.cli.create_lock", _fake_create_lock)
+    monkeypatch.setattr("lol.cli._is_interactive", lambda: True)
+
+    result = CliRunner().invoke(cli, ["config", "edit"], input="\n\n\n\n\ny\n")
+
+    assert result.exit_code == 0, result.output
+    updated = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    assert updated["pipeline"]["file"] == "   "

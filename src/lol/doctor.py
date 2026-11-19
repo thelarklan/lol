@@ -15,6 +15,7 @@ from lol.config import EffectiveConfig
 from lol.constants import LOCK_NAME, SUPPORTED_JAVA_VERSIONS
 from lol.errors import LolError
 from lol.lockfile import load_lock, verify_lock_cache
+from lol.process import pidfd_supported
 from lol.snapshot import uses_lfs
 
 Status = Literal["pass", "recommendation", "warning", "blocker", "unsupported"]
@@ -204,6 +205,27 @@ def _inside(root: Path, path: Path) -> bool:
     return True
 
 
+def _pidfd() -> Finding:
+    try:
+        supported = pidfd_supported()
+    except LolError as exc:
+        return Finding(
+            "host.pidfd",
+            "blocker",
+            "Linux pidfd support could not be verified",
+            str(exc),
+        )
+    if supported:
+        return Finding("host.pidfd", "pass", "Linux pidfd process management is available")
+    return Finding(
+        "host.pidfd",
+        "unsupported",
+        "Linux pidfd process management is unavailable",
+        recommendation="Use Linux kernel 5.3 or newer with pidfd support.",
+        repair_scope="manual",
+    )
+
+
 def analyze(config: EffectiveConfig, state_path: Path) -> list[Finding]:
     linux = sys.platform.startswith("linux")
     findings = [
@@ -216,11 +238,17 @@ def analyze(config: EffectiveConfig, state_path: Path) -> list[Finding]:
                 else f"host platform is unsupported in v1: {sys.platform}"
             ),
         ),
-        _command("git"),
-        _java(),
-        _writable(state_path),
-        _port(),
     ]
+    if linux:
+        findings.append(_pidfd())
+    findings.extend(
+        [
+            _command("git"),
+            _java(),
+            _writable(state_path),
+            _port(),
+        ]
+    )
     for command in config.values["requirements"]["commands"]:
         if command != "git":
             findings.append(_command(str(command)))

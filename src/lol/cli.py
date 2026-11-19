@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -54,8 +55,24 @@ from lol.runner import (
     load_parameter_definitions,
     read_console,
 )
-from lol.runs import RunRecord, list_runs, load_run
+from lol.runs import ACTIVE_RUN_STATUSES, RunRecord, list_runs, load_run
 from lol.trust import is_trusted, trust
+
+
+class _FiniteFloatRange(click.FloatRange):
+    def convert(
+        self,
+        value: Any,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> Any:
+        result = super().convert(value, param, ctx)
+        if isinstance(result, float) and not math.isfinite(result):
+            self.fail(f"{value!r} is not a finite number.", param, ctx)
+        return result
+
+
+TIMEOUT_OPTION = _FiniteFloatRange(min=0.1)
 
 
 class Context:
@@ -411,8 +428,16 @@ def config_edit(yes: bool) -> None:
     jenkins_version = str(repository_values["jenkins"]["version"])
     interactive = _is_interactive()
     if interactive and not yes:
-        jenkinsfile = click.prompt("Jenkinsfile", default=jenkinsfile)
-        jenkins_version = click.prompt("Jenkins version", default=jenkins_version)
+        entered_jenkinsfile = str(click.prompt("Jenkinsfile", default=jenkinsfile))
+        if entered_jenkinsfile != jenkinsfile:
+            jenkinsfile = entered_jenkinsfile.strip()
+            if not jenkinsfile:
+                raise ConfigError("Jenkinsfile must not be empty")
+        entered_version = str(click.prompt("Jenkins version", default=jenkins_version))
+        if entered_version != jenkins_version:
+            jenkins_version = entered_version.strip()
+            if not jenkins_version:
+                raise ConfigError("Jenkins version must not be empty")
         label_text = click.prompt("Node labels (comma-separated)", default=",".join(labels))
         labels = tuple(item.strip() for item in label_text.split(",") if item.strip())
         require_podman = click.confirm("Require rootless Podman?", default=require_podman)
@@ -560,7 +585,7 @@ def _controller_payload(identity: ProjectIdentity, state: ControllerStatus) -> d
 @cli.command("up")
 @click.option(
     "--timeout",
-    type=click.FloatRange(min=0.1),
+    type=TIMEOUT_OPTION,
     default=120.0,
     show_default=True,
     help="Seconds to wait for Jenkins startup.",
@@ -603,23 +628,36 @@ def open_command(context: Context) -> None:
 @cli.command("down")
 @click.option(
     "--timeout",
-    type=click.FloatRange(min=0.1),
+    type=TIMEOUT_OPTION,
     default=30.0,
     show_default=True,
     help="Seconds to wait for Jenkins shutdown.",
 )
 @click.option("--yes", is_flag=True, help="Stop without prompting when a run is active.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Send SIGKILL if Jenkins does not stop before the timeout.",
+)
 @click.pass_obj
-def down_command(context: Context, timeout: float, yes: bool) -> None:
+def down_command(context: Context, timeout: float, yes: bool, force: bool) -> None:
     """Stop Jenkins while preserving the repository's generated state."""
     _, identity, paths = _resolved_project()
     active = _active_runs(paths)
+    confirmed_active = yes
     if active and not yes:
         if context.output_format == "json" or not _is_interactive():
             raise InteractionError("a pipeline is active; inspect it and use --yes to stop Jenkins")
         if not click.confirm("A pipeline is active. Stop Jenkins?", default=False):
             raise InteractionError("shutdown cancelled")
-    context.emit(_controller_payload(identity, controller_down(paths, timeout=timeout)))
+        confirmed_active = True
+    state = controller_down(
+        paths,
+        timeout=timeout,
+        force=force,
+        allow_active=confirmed_active,
+    )
+    context.emit(_controller_payload(identity, state))
 
 
 def _active_runs(paths: ProjectPaths) -> list[RunRecord]:
@@ -628,7 +666,7 @@ def _active_runs(paths: ProjectPaths) -> list[RunRecord]:
     return [
         record
         for record in list_runs(paths)
-        if record.metadata.get("status") in {"provisioning", "queued", "running", "stopping"}
+        if record.metadata.get("status") in ACTIVE_RUN_STATUSES
     ]
 
 
@@ -740,10 +778,11 @@ def _resolve_learned_parameters(
     parameters: dict[str, str],
     secret_parameters: dict[str, str],
     *,
+    script: str,
     interactive: bool,
 ) -> None:
     missing: list[str] = []
-    for definition in load_parameter_definitions(paths):
+    for definition in load_parameter_definitions(paths, script=script):
         name = str(definition.get("name") or "")
         if (
             not name
@@ -785,8 +824,8 @@ def _resolve_learned_parameters(
 @click.option("--credential", "credential_values", multiple=True)
 @click.option("--trust-repository", is_flag=True, help="Record trust without prompting.")
 @click.option("--non-interactive", is_flag=True, help="Disable every prompt.")
-@click.option("--controller-timeout", type=click.FloatRange(min=0.1), default=120.0)
-@click.option("--queue-timeout", type=click.FloatRange(min=0.1), default=60.0)
+@click.option("--controller-timeout", type=TIMEOUT_OPTION, default=120.0)
+@click.option("--queue-timeout", type=TIMEOUT_OPTION, default=60.0)
 @click.pass_obj
 def run_command(
     context: Context,
@@ -822,6 +861,9 @@ def run_command(
         candidate = Path(jenkinsfile)
         if candidate.is_absolute() or ".." in candidate.parts:
             raise ConfigError("--jenkinsfile must be a repository-relative path without '..'")
+        script = candidate.as_posix()
+    else:
+        script = Path(str(config.values["pipeline"]["file"])).as_posix()
     parameter_pairs = [_parse_pair(item, "--parameter") for item in parameter_values]
     if len({key for key, _ in parameter_pairs}) != len(parameter_pairs):
         raise ConfigError("--parameter keys must be unique")
@@ -851,6 +893,7 @@ def run_command(
         configured,
         parameters,
         secret_parameters,
+        script=script,
         interactive=prompts_allowed,
     )
     temporary = [_credential(item, interactive=prompts_allowed) for item in credential_values]
